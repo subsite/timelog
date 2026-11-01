@@ -257,3 +257,14 @@ td.group-label.level-2 { padding-left: 58px; }
   .tree-row { flex-wrap: wrap; }
   .tree-row .name { flex-basis: 100%; }
 }
+
+/* ISO date fields with a calendar button that opens the browser's own picker. */
+.iso-field { position: relative; display: flex; gap: 4px; }
+.iso-field input.iso { flex: 1; min-width: 0; }
+.iso-field .picker-button { display: flex; align-items: center; padding: 0 8px; }
+.iso-field .picker-button:disabled { opacity: 0.4; cursor: default; }
+input.picker-proxy {
+  position: absolute; right: 0; bottom: 0;
+  width: 1px; height: 1px; padding: 0; border: 0;
+  opacity: 0; pointer-events: none;
+}

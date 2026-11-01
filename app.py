@@ -77,6 +77,7 @@ SCHEMA = SCHEMA.replace("{entries}", ENTRIES_TABLE.format(name="entries"))
 
 TIME_GROUPS = {"day", "week", "month"}
 GROUPS = TIME_GROUPS | {"customer", "project", "description"}
+MAX_GROUP_LEVELS = 4
 MIN_TS = 946684800  # 2000-01-01
 MAX_TS = 4102444800  # 2100-01-01
 MAX_LOGIN_FAILURES = 5
@@ -639,7 +640,7 @@ def create_app(db_path=None):
         with reading() as conn:
             prefs = read_preferences(conn)
             found = report_rows(conn, query, tz)
-        for row, billable in zip(found, billable_amounts(found, prefs, tz, now)):
+        for row, billable in zip(found, billable_amounts(found, prefs, levels, tz, now)):
             add_to_tree(total, row, levels, tz, now, billable, amount_for(row, billable, prefs))
         return {
             "total": {
@@ -797,7 +798,7 @@ def parse_tz(name):
 
 def parse_groups(raw):
     levels = [level for level in raw.split(",") if level]
-    if len(levels) > 3 or len(set(levels)) != len(levels) or not set(levels) <= GROUPS:
+    if len(levels) > MAX_GROUP_LEVELS or len(set(levels)) != len(levels) or not set(levels) <= GROUPS:
         raise ApiError("Invalid grouping.")
     return levels
 
@@ -855,7 +856,7 @@ def render_csv(found, mode, dialect, levels, tz, prefs):
         return number(seconds / 3600)
 
     now = now_ts()
-    billables = billable_amounts(found, prefs, tz, now)
+    billables = billable_amounts(found, prefs, levels, tz, now)
     buffer = io.StringIO()
     out = csv.writer(buffer, delimiter=";" if dialect == "excel" else ",")
     if mode == "detail":
@@ -906,12 +907,13 @@ def row_seconds(row, now):
     return max(end - row["start_ts"], 0)
 
 
-def billable_amounts(found, prefs, tz, now):
+def billable_amounts(found, prefs, levels, tz, now):
     """Billable seconds per report row, after rounding each billed unit up to a started step.
 
     A unit is an entry, one day's work on a project with one description, or a project's whole
-    time in the report. Its rounding is added to its first row, so groups and totals add up to
-    the rounded amounts."""
+    time in the report, and it is also split by the report's groups: a project grouped by month
+    is rounded once per month. So every group is a whole number of steps. A unit's rounding is
+    added to its first row, so groups and totals add up to the rounded amounts."""
     amounts = [row_seconds(row, now) if row["billable"] else 0 for row in found]
     step = prefs.round_minutes * 60
     if not step:
@@ -927,7 +929,8 @@ def billable_amounts(found, prefs, tz, now):
         else:
             day = datetime.fromtimestamp(row["start_ts"], tz).date()
             key = (day, row["project_id"], row["description"])
-        units.setdefault(key, []).append(index)
+        groups = tuple(group_key(level, levels[:i], row, tz)[0] for i, level in enumerate(levels))
+        units.setdefault((key, groups), []).append(index)
     for indexes in units.values():
         raw = sum(amounts[i] for i in indexes)
         amounts[indexes[0]] += -(-raw // step) * step - raw

@@ -146,12 +146,28 @@ function isDate(value) {
   return dateKey(d) === value;
 }
 
+const CALENDAR_ICON =
+  '<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5">' +
+  '<rect x="2" y="3" width="12" height="11" rx="1.5"/><path d="M2 6.5h12M5.5 1.5v3M10.5 1.5v3"/></svg>';
+
+// The value of an ISO text field as the browser's native date or datetime-local value, or "".
+function toNative(text, withTime) {
+  text = text.trim();
+  if (!withTime) return isDate(text) ? text : "";
+  const m = /^(\d{4}-\d{2}-\d{2})[ T](\d{1,2}):(\d{2})$/.exec(text);
+  return m && !Number.isNaN(fromInput(text)) ? `${m[1]}T${m[2].padStart(2, "0")}:${m[3]}` : "";
+}
+
 // A date or date-and-time field: the browser's own picker in locale mode, otherwise ISO text
-// that is marked invalid until it parses. Both give values that fromInput and isDate read.
+// that is marked invalid until it parses, with a calendar button that opens the browser's
+// picker and writes its choice back as ISO text. Both give values that fromInput and isDate
+// read. Put `el.field` on the page: it is the input plus its button.
 function isoInput({ value = "", withTime, ...props }) {
   if (useLocale()) {
     const { placeholder, ...rest } = props;
-    return h("input", { type: withTime ? "datetime-local" : "date", value, ...rest });
+    const el = h("input", { type: withTime ? "datetime-local" : "date", value, ...rest });
+    el.field = el;
+    return el;
   }
   const format = withTime ? DATETIME_FORMAT : DATE_FORMAT;
   const el = h("input", {
@@ -172,6 +188,31 @@ function isoInput({ value = "", withTime, ...props }) {
   };
   el.addEventListener("input", check);
   check();
+
+  const native = h("input", { type: withTime ? "datetime-local" : "date", class: "picker-proxy", tabIndex: -1, "aria-hidden": "true" });
+  const button = h("button", {
+    type: "button",
+    class: "picker-button",
+    title: "Pick from a calendar",
+    "aria-label": "Pick from a calendar",
+    disabled: el.disabled,
+    innerHTML: CALENDAR_ICON,
+  });
+  button.addEventListener("click", () => {
+    native.value = toNative(el.value, withTime);
+    try {
+      native.showPicker();
+    } catch {
+      native.focus();
+    }
+  });
+  native.addEventListener("change", () => {
+    if (!native.value) return;
+    el.value = withTime ? native.value.slice(0, 16).replace("T", " ") : native.value;
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  el.field = h("span", { class: "iso-field" }, el, button, native);
   return el;
 }
 
@@ -485,8 +526,8 @@ function openEntryEditor({ entry = null, onSaved }) {
     const row = h(
       "div",
       { class: "segment-row" },
-      h("label", {}, "Start", start),
-      h("label", {}, isOpen ? "End (running)" : "End", end),
+      h("label", {}, "Start", start.field),
+      h("label", {}, isOpen ? "End (running)" : "End", end.field),
       durationEl,
       remove
     );
@@ -916,6 +957,8 @@ function presetRange(preset) {
     case "last-week": return [new Date(y, m, d - mondayOffset - 7), new Date(y, m, d - mondayOffset - 1)];
     case "this-month": return [new Date(y, m, 1), new Date(y, m + 1, 0)];
     case "last-month": return [new Date(y, m - 1, 1), new Date(y, m, 0)];
+    case "past-2-months": return [new Date(y, m - 2, 1), new Date(y, m, 0)];
+    case "past-3-months": return [new Date(y, m - 3, 1), new Date(y, m, 0)];
     case "this-year": return [new Date(y, 0, 1), new Date(y, 11, 31)];
     case "last-year": return [new Date(y - 1, 0, 1), new Date(y - 1, 11, 31)];
     default: return null;
@@ -925,7 +968,7 @@ function presetRange(preset) {
 function loadReportForm() {
   const defaults = {
     preset: "this-month", from: "", to: "", customer: "", project: "",
-    billable: "", q: "", group1: "customer", group2: "project", group3: "description", dialect: "standard",
+    billable: "", q: "", group1: "customer", group2: "project", group3: "description", group4: "", dialect: "standard",
   };
   try {
     return { ...defaults, ...JSON.parse(localStorage.getItem(REPORT_KEY) || "{}") };
@@ -945,7 +988,7 @@ function reportParams(form) {
   if (form.project) params.set("project_id", form.project);
   if (form.billable) params.set("billable", form.billable);
   if (form.q.trim()) params.set("q", form.q.trim());
-  const groups = [form.group1, form.group2, form.group3].filter(Boolean);
+  const groups = [form.group1, form.group2, form.group3, form.group4].filter(Boolean);
   params.set("group", [...new Set(groups)].join(","));
   return params;
 }
@@ -996,7 +1039,7 @@ async function showReports() {
         form[key] = value;
         changed();
       });
-      return el;
+      return el.field;
     };
     const search = h("input", { type: "search", value: form.q, placeholder: "Contains…" });
     let timer = null;
@@ -1012,7 +1055,8 @@ async function showReports() {
         { class: "filters" },
         select("preset", "Period", [
           option("this-week", "This week"), option("last-week", "Last week"), option("this-month", "This month"),
-          option("last-month", "Last month"), option("this-year", "This year"), option("last-year", "Last year"),
+          option("last-month", "Last month"), option("past-2-months", "Past two months"),
+          option("past-3-months", "Past three months"), option("this-year", "This year"), option("last-year", "Last year"),
           option("all", "All time"), option("custom", "Custom range"),
         ], renderControls),
         customSelected ? h("label", {}, "From", dateInput("from")) : null,
@@ -1034,7 +1078,8 @@ async function showReports() {
         { class: "filters compact" },
         select("group1", "Group by", groupOptions()),
         select("group2", "Then by", groupOptions()),
-        select("group3", "Then by", groupOptions())
+        select("group3", "Then by", groupOptions()),
+        select("group4", "Then by", groupOptions())
       )
     );
   }
@@ -1366,7 +1411,8 @@ async function showSettings() {
           { class: "hint" },
           "Rounding changes billable hours and amounts in reports and CSV exports. Tracked time is never changed. ",
           "Rounding by day adds up short sessions on the same work before rounding, so 3 × 10 minutes bills as one started 30 minutes. ",
-          "Rounding by project adds up all of a project's time in the report's date range and rounds it once."
+          "Rounding by project adds up all of a project's time in the report's date range and rounds it once. ",
+          "Rounding is done within each row of a report, so every row bills whole steps: grouped by month, a project is rounded once per month."
         )
       ),
       status

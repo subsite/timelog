@@ -534,7 +534,7 @@ def test_report_includes_running_timer(client, clock):
         {"from": "yesterday"},
         {"group": "nope"},
         {"group": "day,day"},
-        {"group": "customer,project,description,day"},
+        {"group": "customer,project,description,day,week"},
         {"group": "task"},
         {"billable": "maybe"},
         {"customer_id": "abc"},
@@ -641,8 +641,33 @@ def test_billable_rounding_per_project(client):
     data = report(client, group="project")
     assert data["total"]["billable_seconds"] == 60 * 60
     assert sorted(g["billable_seconds"] for g in data["groups"]) == [30 * 60, 30 * 60]
-    # Any grouping adds up to the same rounded total.
-    assert sum(g["billable_seconds"] for g in report(client, group="day")["groups"]) == 60 * 60
+    # Grouping by day rounds each day's part of a project on its own.
+    days = report(client, group="day")
+    assert [g["billable_seconds"] for g in days["groups"]] == [30 * 60, 60 * 60]
+    assert days["total"]["billable_seconds"] == 90 * 60
+
+
+def test_rounding_unit_is_split_by_report_groups(client):
+    project_id = add_project(client)
+    # 10 min in October and 10 min in November.
+    add_entry(client, project_id, (ts(2026, 10, 30, 9), ts(2026, 10, 30, 9, 10)), description="A")
+    add_entry(client, project_id, (ts(2026, 11, 2, 9), ts(2026, 11, 2, 9, 10)), description="B")
+    set_prefs(client, round_minutes=30, round_scope="project")
+    assert report(client, group="")["total"]["billable_seconds"] == 30 * 60
+    for group in ("month", "description"):
+        data = report(client, group=group)
+        assert [g["billable_seconds"] for g in data["groups"]] == [30 * 60, 30 * 60], group
+        assert data["total"]["billable_seconds"] == 60 * 60
+    months = report(client, group="project,month,day,description")["groups"][0]["children"]
+    assert [m["billable_seconds"] for m in months] == [30 * 60, 30 * 60]
+    rows = read_csv(client.get("/api/report.csv", params={"tz": "Europe/Helsinki", "mode": "detail", "group": "month"}))
+    assert [r[-2] for r in rows[1:]] == ["0.50", "0.50"]
+
+
+def test_report_allows_four_group_levels(client):
+    add_entry(client, add_project(client), (ts(2026, 10, 12, 9), ts(2026, 10, 12, 10)), description="Fix")
+    data = report(client, group="customer,project,month,description")
+    assert data["groups"][0]["children"][0]["children"][0]["children"][0]["label"] == "Fix"
 
 
 def test_billable_rounding_counts_paused_entry_once(client):
