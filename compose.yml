@@ -2,8 +2,8 @@ services:
   timelog:
     build: .
     restart: unless-stopped
-    environment:
-      TIMELOG_BEHIND_PROXY: "1"
+    # GitHub sign-in settings; see .env.example.
+    env_file: .env
     ports:
       # Local only: put an HTTPS reverse proxy in front.
       - "127.0.0.1:8000:8000"

@@ -1,23 +1,23 @@
-"""Timelog: a single-user time tracker (Customer > Project, entries described in free text)."""
+"""Timelog: a time tracker (Customer > Project, entries described in free text); each user's data is separate."""
 import csv
-import getpass
-import hashlib
 import hmac
 import io
 import json
 import os
+import re
 import secrets
 import sqlite3
 import sys
-import threading
 import time
+import urllib.parse
+import urllib.request
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Literal
 from zoneinfo import ZoneInfo
 
-from fastapi import FastAPI, Form, Query, Request
+from fastapi import Depends, FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -29,17 +29,13 @@ from starlette.middleware.sessions import SessionMiddleware
 BASE_DIR = Path(__file__).parent
 
 SCHEMA = """
+-- Only the session secret; everything else belongs to a user.
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
-CREATE TABLE IF NOT EXISTS customers (
-    id INTEGER PRIMARY KEY,
-    name TEXT NOT NULL COLLATE NOCASE UNIQUE,
-    archived INTEGER NOT NULL DEFAULT 0,
-    -- NULL means the default hourly rate from preferences.
-    hourly_rate REAL CHECK (hourly_rate IS NULL OR hourly_rate >= 0)
-);
+{users};
+{customers}
 CREATE TABLE IF NOT EXISTS projects (
     id INTEGER PRIMARY KEY,
     customer_id INTEGER NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
@@ -48,9 +44,10 @@ CREATE TABLE IF NOT EXISTS projects (
     UNIQUE (customer_id, name)
 );
 {entries}
--- Only one entry can be running or paused at a time.
-CREATE UNIQUE INDEX IF NOT EXISTS one_active_entry ON entries (state != 'stopped')
+-- Each user can have only one entry running or paused at a time.
+CREATE UNIQUE INDEX IF NOT EXISTS one_active_entry_per_user ON entries (user_id)
     WHERE state != 'stopped';
+CREATE INDEX IF NOT EXISTS entries_user ON entries (user_id);
 -- An entry's duration is the sum of its segments; pausing closes a segment.
 CREATE TABLE IF NOT EXISTS segments (
     id INTEGER PRIMARY KEY,
@@ -63,8 +60,51 @@ CREATE INDEX IF NOT EXISTS segments_entry ON segments (entry_id);
 CREATE INDEX IF NOT EXISTS segments_start ON segments (start_ts);
 """
 
-# The description is what was worked on; there is no task level below projects.
+# Users share nothing: customers and entries belong to one user, projects to a customer.
+USERS_TABLE = """
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY,
+    -- Users are invited by email; signing in with GitHub matches a verified address.
+    email TEXT NOT NULL COLLATE NOCASE UNIQUE,
+    -- Set on the first GitHub sign-in, so later sign-ins survive email changes on GitHub.
+    github_id INTEGER UNIQUE,
+    preferences TEXT NOT NULL DEFAULT '{}',
+    disabled INTEGER NOT NULL DEFAULT 0,
+    -- Stored in sessions; raising it logs the user out everywhere.
+    session_epoch INTEGER NOT NULL DEFAULT 0
+)
+"""
+
+CUSTOMERS_TABLE = """
+CREATE TABLE IF NOT EXISTS {name} (
+    id INTEGER PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name TEXT NOT NULL COLLATE NOCASE,
+    archived INTEGER NOT NULL DEFAULT 0,
+    -- NULL means the default hourly rate from the user's preferences.
+    hourly_rate REAL CHECK (hourly_rate IS NULL OR hourly_rate >= 0),
+    UNIQUE (user_id, name)
+);
+"""
+
+# The description is what was worked on; there is no task level below projects. user_id is
+# always the owner of the entry's project; it is stored for the one-active-entry index.
 ENTRIES_TABLE = """
+CREATE TABLE IF NOT EXISTS {name} (
+    id INTEGER PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+    description TEXT NOT NULL DEFAULT '',
+    billable INTEGER NOT NULL DEFAULT 1,
+    state TEXT NOT NULL DEFAULT 'stopped' CHECK (state IN ('running', 'paused', 'stopped'))
+);
+"""
+SCHEMA = SCHEMA.replace("{users}", USERS_TABLE)
+SCHEMA = SCHEMA.replace("{customers}", CUSTOMERS_TABLE.format(name="customers"))
+SCHEMA = SCHEMA.replace("{entries}", ENTRIES_TABLE.format(name="entries"))
+
+# The entries table before users existed; migrate_tasks_into_descriptions still builds it.
+SINGLE_USER_ENTRIES_TABLE = """
 CREATE TABLE IF NOT EXISTS {name} (
     id INTEGER PRIMARY KEY,
     project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
@@ -73,15 +113,19 @@ CREATE TABLE IF NOT EXISTS {name} (
     state TEXT NOT NULL DEFAULT 'stopped' CHECK (state IN ('running', 'paused', 'stopped'))
 );
 """
-SCHEMA = SCHEMA.replace("{entries}", ENTRIES_TABLE.format(name="entries"))
+# Owner of a single-user database's data after migration; rename with `app.py set-email`.
+FIRST_USER_EMAIL = "owner@localhost"
+EMAIL_PATTERN = r"[^@\s]+@[^@\s]+"
+
+GITHUB_AUTHORIZE_URL = "https://github.com/login/oauth/authorize"
+GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token"
+GITHUB_API = "https://api.github.com"
 
 TIME_GROUPS = {"day", "week", "month"}
 GROUPS = TIME_GROUPS | {"customer", "project", "description"}
 MAX_GROUP_LEVELS = 4
 MIN_TS = 946684800  # 2000-01-01
 MAX_TS = 4102444800  # 2100-01-01
-MAX_LOGIN_FAILURES = 5
-LOGIN_WINDOW = 15 * 60
 SESSION_LIFETIME = int(timedelta(days=90).total_seconds())
 
 CSP = "default-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
@@ -167,6 +211,14 @@ class Preferences(Body):
     currency: Literal[CURRENCIES] = "EUR"
 
 
+def current_user(request: Request) -> int:
+    """The logged-in user's id; the protect middleware has already checked the session."""
+    return request.state.user_id
+
+
+UserId = Annotated[int, Depends(current_user)]
+
+
 class ReportQuery(BaseModel):
     tz: str = "UTC"
     start_date: date | None = Field(default=None, alias="from")
@@ -197,9 +249,11 @@ def init_db(path):
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     conn = connect(path)
     conn.execute("PRAGMA journal_mode = WAL")
+    # Migrations of older shapes run first; SCHEMA then only adds what is missing.
     migrate_tasks_into_descriptions(conn)
-    conn.executescript(SCHEMA)
     add_customer_rate_column(conn)
+    migrate_to_users(conn)
+    conn.executescript(SCHEMA)
     conn.execute(
         "INSERT OR IGNORE INTO settings (key, value) VALUES ('secret_key', ?)",
         (secrets.token_hex(32),),
@@ -216,7 +270,7 @@ def migrate_tasks_into_descriptions(conn):
     try:
         conn.execute("BEGIN IMMEDIATE")
         conn.execute("DROP TABLE IF EXISTS entries_new")
-        conn.execute(ENTRIES_TABLE.format(name="entries_new"))
+        conn.execute(SINGLE_USER_ENTRIES_TABLE.format(name="entries_new"))
         conn.execute(
             """
             INSERT INTO entries_new (id, project_id, description, billable, state)
@@ -240,13 +294,62 @@ def migrate_tasks_into_descriptions(conn):
         conn.execute("PRAGMA foreign_keys = ON")
 
 
+def table_columns(conn, table):
+    return [row["name"] for row in conn.execute(f"PRAGMA table_info({table})")]
+
+
 def add_customer_rate_column(conn):
-    columns = [row["name"] for row in conn.execute("PRAGMA table_info(customers)")]
-    if "hourly_rate" not in columns:
+    columns = table_columns(conn, "customers")
+    if columns and "hourly_rate" not in columns:
         conn.execute(
             "ALTER TABLE customers ADD COLUMN hourly_rate REAL "
             "CHECK (hourly_rate IS NULL OR hourly_rate >= 0)"
         )
+
+
+def migrate_to_users(conn):
+    """Single-user databases get one user, FIRST_USER_EMAIL, who owns all data and the
+    preferences; the old password is dropped. Until then customers were global and entries
+    had no owner."""
+    customers = table_columns(conn, "customers")
+    if not customers or "user_id" in customers:
+        return
+    # Rebuilding tables that others reference needs foreign keys off, outside a transaction.
+    conn.execute("PRAGMA foreign_keys = OFF")
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(USERS_TABLE)
+        password_hash = get_setting(conn, "password_hash")
+        preferences = get_setting(conn, "preferences") or "{}"
+        has_data = conn.execute("SELECT 1 FROM customers").fetchone()
+        user_id = None
+        if password_hash or has_data:
+            user_id = conn.execute(
+                "INSERT INTO users (email, preferences) VALUES (?, ?)", (FIRST_USER_EMAIL, preferences)
+            ).lastrowid
+        conn.execute("DELETE FROM settings WHERE key IN ('password_hash', 'preferences')")
+
+        for table, template, columns in (
+            ("customers", CUSTOMERS_TABLE, "id, name, archived, hourly_rate"),
+            ("entries", ENTRIES_TABLE, "id, project_id, description, billable, state"),
+        ):
+            conn.execute(f"DROP TABLE IF EXISTS {table}_new")
+            conn.execute(template.format(name=f"{table}_new"))
+            conn.execute(
+                f"INSERT INTO {table}_new (user_id, {columns}) SELECT ?, {columns} FROM {table}",
+                (user_id,),
+            )
+            conn.execute(f"DROP TABLE {table}")
+            conn.execute(f"ALTER TABLE {table}_new RENAME TO {table}")
+        if conn.execute("PRAGMA foreign_key_check").fetchone():
+            raise RuntimeError("Migration left broken references; nothing was changed.")
+        conn.execute("COMMIT")
+    except BaseException:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.execute("PRAGMA foreign_keys = ON")
 
 
 def get_setting(conn, key):
@@ -254,11 +357,11 @@ def get_setting(conn, key):
     return row["value"] if row else None
 
 
-def read_preferences(conn):
-    stored = get_setting(conn, "preferences")
+def read_preferences(conn, user_id):
+    row = conn.execute("SELECT preferences FROM users WHERE id = ?", (user_id,)).fetchone()
     try:
-        return Preferences.model_validate(json.loads(stored)) if stored else Preferences()
-    except ValueError:
+        return Preferences.model_validate(json.loads(row["preferences"]))
+    except (TypeError, ValueError):
         return Preferences()
 
 
@@ -266,29 +369,80 @@ def db_path_from_env():
     return os.environ.get("TIMELOG_DB", str(BASE_DIR / "data" / "timelog.db"))
 
 
-# --- Passwords ---
+# --- Users ---
 
 
-def scrypt(password, salt):
-    return hashlib.scrypt(password.encode(), salt=salt, n=2**15, r=8, p=1, maxmem=64 * 1024 * 1024)
+def normalize_email(email):
+    email = email.strip()
+    if len(email) > 254 or not re.fullmatch(EMAIL_PATTERN, email):
+        raise ValueError(f"Not an email address: {email!r}")
+    return email
 
 
-def set_password(conn, password):
-    salt = secrets.token_bytes(16)
-    conn.execute(
-        "INSERT OR REPLACE INTO settings (key, value) VALUES ('password_hash', ?)",
-        (f"{salt.hex()}${scrypt(password, salt).hex()}",),
-    )
+def find_user(conn, email):
+    return conn.execute("SELECT * FROM users WHERE email = ?", (email.strip(),)).fetchone()
 
 
-def check_password(password_hash, password):
-    salt, digest = password_hash.split("$")
-    return hmac.compare_digest(scrypt(password, bytes.fromhex(salt)).hex(), digest)
+def require_user(conn, email):
+    user = find_user(conn, email)
+    if user is None:
+        raise ValueError(f"No user with the email {email}.")
+    return user
 
 
-def password_fingerprint(password_hash):
-    # Stored in the session, so changing the password logs out every session.
-    return hashlib.sha256(password_hash.encode()).hexdigest()[:16]
+def add_user(conn, email):
+    email = normalize_email(email)
+    if find_user(conn, email):
+        raise ValueError(f"A user with the email {email} already exists.")
+    return conn.execute("INSERT INTO users (email) VALUES (?)", (email,)).lastrowid
+
+
+# --- Sign in with GitHub ---
+
+
+def github_request(url, token=None, data=None):
+    """One JSON request to GitHub: a POST when data is given, otherwise a GET."""
+    headers = {"Accept": "application/json", "User-Agent": "Timelog"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    body = urllib.parse.urlencode(data).encode() if data is not None else None
+    request = urllib.request.Request(url, data=body, headers=headers)
+    with urllib.request.urlopen(request, timeout=15) as response:
+        return json.load(response)
+
+
+def github_identity(client_id, client_secret, code, redirect_uri):
+    """Exchanges a callback code for the GitHub account's id and verified email addresses."""
+    token = github_request(
+        GITHUB_TOKEN_URL,
+        data={
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "code": code,
+            "redirect_uri": redirect_uri,
+        },
+    ).get("access_token")
+    if not token:
+        raise ValueError("GitHub did not accept the sign-in code.")
+    account = github_request(f"{GITHUB_API}/user", token=token)
+    emails = github_request(f"{GITHUB_API}/user/emails", token=token)
+    verified = [item["email"] for item in emails if item.get("verified")]
+    return int(account["id"]), verified
+
+
+def user_for_github(conn, github_id, verified_emails):
+    """The enabled user this GitHub account signs in as, linking it on the first sign-in."""
+    user = conn.execute("SELECT * FROM users WHERE github_id = ?", (github_id,)).fetchone()
+    if user is None:
+        for email in verified_emails:
+            found = find_user(conn, email)
+            if found and found["github_id"] is None:
+                conn.execute("UPDATE users SET github_id = ? WHERE id = ?", (github_id, found["id"]))
+                user = find_user(conn, email)
+                break
+    if user is None or user["disabled"]:
+        return None
+    return user
 
 
 # --- Application ---
@@ -300,9 +454,10 @@ def create_app(db_path=None):
     secret_key = get_setting(conn, "secret_key")
     conn.close()
 
-    behind_proxy = os.environ.get("TIMELOG_BEHIND_PROXY") == "1"
-    login_failures = {}
-    login_lock = threading.Lock()
+    github_client_id = os.environ.get("TIMELOG_GITHUB_CLIENT_ID", "")
+    github_client_secret = os.environ.get("TIMELOG_GITHUB_CLIENT_SECRET", "")
+    base_url = os.environ.get("TIMELOG_BASE_URL", "http://localhost:8000").rstrip("/")
+    github_callback = f"{base_url}/auth/github/callback"
     templates = Jinja2Templates(directory=BASE_DIR / "templates")
 
     @contextmanager
@@ -327,30 +482,31 @@ def create_app(db_path=None):
         finally:
             conn.close()
 
-    def read_password_hash():
+    def session_user(session):
+        """The logged-in user's id, if that user still exists, is enabled and has not been
+        logged out everywhere since this session signed in."""
+        user_id = session.get("uid")
+        if not isinstance(user_id, int):
+            return None
         with reading() as conn:
-            return get_setting(conn, "password_hash")
-
-    def client_ip(request):
-        # The proxy appends the address it saw, so earlier values can be forged by the client.
-        forwarded = request.headers.get("x-forwarded-for")
-        if behind_proxy and forwarded:
-            return forwarded.split(",")[-1].strip()
-        return request.client.host if request.client else "unknown"
+            user = conn.execute(
+                "SELECT disabled, session_epoch FROM users WHERE id = ?", (user_id,)
+            ).fetchone()
+        if not user or user["disabled"] or session.get("epoch") != user["session_epoch"]:
+            return None
+        return user_id
 
     app = FastAPI(title="Timelog", docs_url="/docs", redoc_url=None)
 
     @app.middleware("http")
     async def protect(request, call_next):
         path = request.url.path
-        if path == "/login" or path.startswith("/static/"):
+        if path == "/login" or path.startswith(("/static/", "/auth/")):
             response = await call_next(request)
         else:
-            password_hash = await run_in_threadpool(read_password_hash)
-            authed = password_hash and hmac.compare_digest(
-                request.session.get("pw", ""), password_fingerprint(password_hash)
-            )
-            if authed:
+            user_id = await run_in_threadpool(session_user, request.session)
+            if user_id is not None:
+                request.state.user_id = user_id
                 response = await call_next(request)
             elif path.startswith("/api/"):
                 response = JSONResponse({"error": "Not logged in"}, status_code=401)
@@ -401,30 +557,46 @@ def create_app(db_path=None):
         return templates.TemplateResponse(
             request,
             "login.html",
-            {"configured": read_password_hash() is not None, "error": error},
+            {"configured": bool(github_client_id and github_client_secret), "error": error},
         )
 
-    @app.post("/login", include_in_schema=False)
-    def login(request: Request, password: Annotated[str, Form()] = ""):
-        ip = client_ip(request)
-        now = time.time()
-        with login_lock:
-            for key in [k for k, v in login_failures.items() if v[-1] < now - LOGIN_WINDOW]:
-                del login_failures[key]
-            failures = [t for t in login_failures.get(ip, []) if t >= now - LOGIN_WINDOW]
-            if len(failures) >= MAX_LOGIN_FAILURES:
-                return RedirectResponse("/login?error=locked", status_code=303)
+    @app.get("/auth/github", include_in_schema=False)
+    def github_start(request: Request):
+        if not (github_client_id and github_client_secret):
+            return RedirectResponse("/login", status_code=303)
+        # The state ties GitHub's answer to this browser, so nobody can sign it in as someone else.
+        state = secrets.token_urlsafe(32)
+        request.session["oauth_state"] = state
+        query = urllib.parse.urlencode(
+            {
+                "client_id": github_client_id,
+                "redirect_uri": github_callback,
+                "scope": "user:email",
+                "state": state,
+                "allow_signup": "false",
+            }
+        )
+        return RedirectResponse(f"{GITHUB_AUTHORIZE_URL}?{query}", status_code=303)
 
-        password_hash = read_password_hash()
-        if not password_hash or not check_password(password_hash, password):
-            with login_lock:
-                login_failures[ip] = failures + [now]
-            return RedirectResponse("/login?error=invalid", status_code=303)
-
-        with login_lock:
-            login_failures.pop(ip, None)
+    @app.get("/auth/github/callback", include_in_schema=False)
+    def github_callback_route(request: Request, code: str = "", state: str = "", error: str = ""):
+        expected = request.session.pop("oauth_state", None)
+        if error:
+            return RedirectResponse("/login?error=denied", status_code=303)
+        if not expected or not state or not hmac.compare_digest(expected, state) or not code:
+            return RedirectResponse("/login?error=expired", status_code=303)
+        try:
+            github_id, emails = github_identity(github_client_id, github_client_secret, code, github_callback)
+        except Exception as err:  # Network trouble or an unexpected answer from GitHub.
+            print(f"GitHub sign-in failed: {err!r}", file=sys.stderr)
+            return RedirectResponse("/login?error=failed", status_code=303)
+        with writing() as conn:
+            user = user_for_github(conn, github_id, emails)
+        if user is None:
+            return RedirectResponse("/login?error=noaccess", status_code=303)
         request.session.clear()
-        request.session["pw"] = password_fingerprint(password_hash)
+        request.session["uid"] = user["id"]
+        request.session["epoch"] = user["session_epoch"]
         return RedirectResponse("/", status_code=303)
 
     @app.post("/logout", include_in_schema=False)
@@ -435,51 +607,65 @@ def create_app(db_path=None):
     # --- Preferences ---
 
     @app.get("/api/preferences", tags=["preferences"])
-    def get_preferences() -> Preferences:
+    def get_preferences(uid: UserId) -> Preferences:
         with reading() as conn:
-            return read_preferences(conn)
+            return read_preferences(conn, uid)
 
     @app.put("/api/preferences", tags=["preferences"])
-    def put_preferences(body: Preferences) -> Preferences:
+    def put_preferences(body: Preferences, uid: UserId) -> Preferences:
         with writing() as conn:
-            conn.execute(
-                "INSERT OR REPLACE INTO settings (key, value) VALUES ('preferences', ?)",
-                (body.model_dump_json(),),
-            )
-            return read_preferences(conn)
+            conn.execute("UPDATE users SET preferences = ? WHERE id = ?", (body.model_dump_json(), uid))
+            return read_preferences(conn, uid)
+
+    @app.get("/api/me", tags=["preferences"])
+    def me(uid: UserId):
+        with reading() as conn:
+            return {"email": conn.execute("SELECT email FROM users WHERE id = ?", (uid,)).fetchone()["email"]}
 
     # --- Customers and projects ---
 
     @app.get("/api/tree", tags=["hierarchy"])
-    def tree():
+    def tree(uid: UserId):
         with reading() as conn:
             return {
-                kind: rows(conn.execute(f"SELECT * FROM {kind} ORDER BY name"))
-                for kind in ("customers", "projects")
+                "customers": rows(
+                    conn.execute(
+                        "SELECT id, name, archived, hourly_rate FROM customers WHERE user_id = ? ORDER BY name",
+                        (uid,),
+                    )
+                ),
+                "projects": rows(
+                    conn.execute(
+                        """
+                        SELECT p.* FROM projects p JOIN customers c ON c.id = p.customer_id
+                        WHERE c.user_id = ? ORDER BY p.name
+                        """,
+                        (uid,),
+                    )
+                ),
             }
 
-    def insert_item(kind, columns, values):
-        with writing() as conn:
-            marks = ", ".join("?" * len(values))
-            cur = conn.execute(f"INSERT INTO {kind} ({columns}) VALUES ({marks})", values)
-            return fetch_item(conn, kind, cur.lastrowid)
-
     @app.post("/api/customers", status_code=201, tags=["hierarchy"])
-    def create_customer(body: CustomerCreate):
-        return insert_item("customers", "name", (body.name,))
+    def create_customer(body: CustomerCreate, uid: UserId):
+        with writing() as conn:
+            cur = conn.execute("INSERT INTO customers (user_id, name) VALUES (?, ?)", (uid, body.name))
+            return fetch_item(conn, "customers", cur.lastrowid)
 
     @app.post("/api/projects", status_code=201, tags=["hierarchy"])
-    def create_project(body: ProjectCreate):
-        with reading() as conn:
-            require_row(conn, "customers", body.customer_id)
-        return insert_item("projects", "customer_id, name", (body.customer_id, body.name))
+    def create_project(body: ProjectCreate, uid: UserId):
+        with writing() as conn:
+            require_row(conn, "customers", body.customer_id, uid)
+            cur = conn.execute(
+                "INSERT INTO projects (customer_id, name) VALUES (?, ?)", (body.customer_id, body.name)
+            )
+            return fetch_item(conn, "projects", cur.lastrowid)
 
     def register_item_routes(kind):
-        def update_item(item_id: int, body: ItemUpdate):
+        def update_item(item_id: int, body: ItemUpdate, uid: UserId):
             if "hourly_rate" in body.model_fields_set and kind != "customers":
                 raise ApiError("Only customers have an hourly rate.")
             with writing() as conn:
-                require_row(conn, kind, item_id)
+                require_row(conn, kind, item_id, uid)
                 if "hourly_rate" in body.model_fields_set:
                     conn.execute(
                         "UPDATE customers SET hourly_rate = ? WHERE id = ?", (body.hourly_rate, item_id)
@@ -492,9 +678,9 @@ def create_app(db_path=None):
                     )
                 return fetch_item(conn, kind, item_id)
 
-        def delete_item(item_id: int):
+        def delete_item(item_id: int, uid: UserId):
             with writing() as conn:
-                require_row(conn, kind, item_id)
+                require_row(conn, kind, item_id, uid)
                 conn.execute(f"DELETE FROM {kind} WHERE id = ?", (item_id,))
 
         app.add_api_route(
@@ -512,55 +698,61 @@ def create_app(db_path=None):
     # --- Timer ---
 
     @app.get("/api/timer", tags=["timer"])
-    def timer():
+    def timer(uid: UserId):
         with reading() as conn:
-            return timer_payload(conn)
+            return timer_payload(conn, uid)
 
     @app.post("/api/timer/start", tags=["timer"])
-    def timer_start(body: TimerStart):
+    def timer_start(body: TimerStart, uid: UserId):
         with writing() as conn:
-            require_row(conn, "projects", body.project_id)
-            active = conn.execute("SELECT id FROM entries WHERE state != 'stopped'").fetchone()
+            require_row(conn, "projects", body.project_id, uid)
+            active = conn.execute(
+                "SELECT id FROM entries WHERE user_id = ? AND state != 'stopped'", (uid,)
+            ).fetchone()
             if active:
                 stop_entry(conn, active["id"])
             cur = conn.execute(
-                "INSERT INTO entries (project_id, description, billable, state) VALUES (?, ?, ?, 'running')",
-                (body.project_id, body.description, int(body.billable)),
+                """
+                INSERT INTO entries (user_id, project_id, description, billable, state)
+                VALUES (?, ?, ?, ?, 'running')
+                """,
+                (uid, body.project_id, body.description, int(body.billable)),
             )
             conn.execute(
                 "INSERT INTO segments (entry_id, start_ts) VALUES (?, ?)", (cur.lastrowid, now_ts())
             )
-            return timer_payload(conn)
+            return timer_payload(conn, uid)
 
     @app.post("/api/timer/pause", tags=["timer"])
-    def timer_pause():
+    def timer_pause(uid: UserId):
         with writing() as conn:
-            entry = active_entry(conn, "running")
+            entry = active_entry(conn, uid, "running")
             close_open_segment(conn, entry["id"])
             conn.execute("UPDATE entries SET state = 'paused' WHERE id = ?", (entry["id"],))
-            return timer_payload(conn)
+            return timer_payload(conn, uid)
 
     @app.post("/api/timer/resume", tags=["timer"])
-    def timer_resume():
+    def timer_resume(uid: UserId):
         with writing() as conn:
-            entry = active_entry(conn, "paused")
+            entry = active_entry(conn, uid, "paused")
             conn.execute("UPDATE entries SET state = 'running' WHERE id = ?", (entry["id"],))
             conn.execute(
                 "INSERT INTO segments (entry_id, start_ts) VALUES (?, ?)", (entry["id"], now_ts())
             )
-            return timer_payload(conn)
+            return timer_payload(conn, uid)
 
     @app.post("/api/timer/stop", tags=["timer"])
-    def timer_stop():
+    def timer_stop(uid: UserId):
         with writing() as conn:
-            entry = active_entry(conn, "running", "paused")
+            entry = active_entry(conn, uid, "running", "paused")
             stop_entry(conn, entry["id"])
-            return timer_payload(conn)
+            return timer_payload(conn, uid)
 
     # --- Entries ---
 
     @app.get("/api/entries", tags=["entries"])
     def list_entries(
+        uid: UserId,
         limit: Annotated[int, Query(ge=0, le=200)] = 50,
         offset: Annotated[int, Query(ge=0)] = 0,
     ):
@@ -568,11 +760,11 @@ def create_app(db_path=None):
             found = conn.execute(
                 """
                 SELECT e.* FROM entries e
-                WHERE e.state = 'stopped'
+                WHERE e.user_id = ? AND e.state = 'stopped'
                 ORDER BY (SELECT MIN(start_ts) FROM segments s WHERE s.entry_id = e.id) DESC, e.id DESC
                 LIMIT ? OFFSET ?
                 """,
-                (limit + 1, offset),
+                (uid, limit + 1, offset),
             ).fetchall()
             return {
                 "entries": serialize_entries(conn, found[:limit]),
@@ -580,7 +772,7 @@ def create_app(db_path=None):
             }
 
     @app.get("/api/recent", tags=["entries"])
-    def recent(limit: Annotated[int, Query(ge=1, le=500)] = 200):
+    def recent(uid: UserId, limit: Annotated[int, Query(ge=1, le=500)] = 200):
         """Distinct description and project pairs, most recently used first, for continuing work."""
         with reading() as conn:
             return rows(
@@ -588,33 +780,33 @@ def create_app(db_path=None):
                     """
                     SELECT e.description, e.project_id, e.billable, MAX(s.start_ts) AS last_used
                     FROM entries e JOIN segments s ON s.entry_id = e.id
-                    WHERE e.description != ''
+                    WHERE e.user_id = ? AND e.description != ''
                     GROUP BY e.description, e.project_id
                     ORDER BY last_used DESC
                     LIMIT ?
                     """,
-                    (limit,),
+                    (uid, limit),
                 )
             )
 
     @app.post("/api/entries", status_code=201, tags=["entries"])
-    def create_entry(body: EntryWrite):
+    def create_entry(body: EntryWrite, uid: UserId):
         with writing() as conn:
-            require_row(conn, "projects", body.project_id)
+            require_row(conn, "projects", body.project_id, uid)
             segments = clean_segments(body.segments, "stopped")
             cur = conn.execute(
-                "INSERT INTO entries (project_id, description, billable) VALUES (?, ?, ?)",
-                (body.project_id, body.description, int(body.billable)),
+                "INSERT INTO entries (user_id, project_id, description, billable) VALUES (?, ?, ?, ?)",
+                (uid, body.project_id, body.description, int(body.billable)),
             )
             replace_segments(conn, cur.lastrowid, segments)
             return fetch_entry(conn, cur.lastrowid)
 
     @app.put("/api/entries/{entry_id}", tags=["entries"])
-    def update_entry(entry_id: int, body: EntryWrite):
+    def update_entry(entry_id: int, body: EntryWrite, uid: UserId):
         with writing() as conn:
-            require_row(conn, "entries", entry_id)
+            require_row(conn, "entries", entry_id, uid)
             state = conn.execute("SELECT state FROM entries WHERE id = ?", (entry_id,)).fetchone()["state"]
-            require_row(conn, "projects", body.project_id)
+            require_row(conn, "projects", body.project_id, uid)
             segments = clean_segments(body.segments, state)
             conn.execute(
                 "UPDATE entries SET project_id = ?, description = ?, billable = ? WHERE id = ?",
@@ -624,22 +816,22 @@ def create_app(db_path=None):
             return fetch_entry(conn, entry_id)
 
     @app.delete("/api/entries/{entry_id}", status_code=204, tags=["entries"])
-    def delete_entry(entry_id: int):
+    def delete_entry(entry_id: int, uid: UserId):
         with writing() as conn:
-            require_row(conn, "entries", entry_id)
+            require_row(conn, "entries", entry_id, uid)
             conn.execute("DELETE FROM entries WHERE id = ?", (entry_id,))
 
     # --- Reports ---
 
     @app.get("/api/report", tags=["reports"])
-    def report(query: Annotated[ReportQuery, Query()]):
+    def report(query: Annotated[ReportQuery, Query()], uid: UserId):
         tz = parse_tz(query.tz)
         levels = parse_groups(query.group)
         now = now_ts()
         total = new_node("")
         with reading() as conn:
-            prefs = read_preferences(conn)
-            found = report_rows(conn, query, tz)
+            prefs = read_preferences(conn, uid)
+            found = report_rows(conn, uid, query, tz)
         for row, billable in zip(found, billable_amounts(found, prefs, levels, tz, now)):
             add_to_tree(total, row, levels, tz, now, billable, amount_for(row, billable, prefs))
         return {
@@ -652,12 +844,12 @@ def create_app(db_path=None):
         }
 
     @app.get("/api/report.csv", tags=["reports"])
-    def report_csv(query: Annotated[CsvQuery, Query()]):
+    def report_csv(query: Annotated[CsvQuery, Query()], uid: UserId):
         tz = parse_tz(query.tz)
         levels = parse_groups(query.group)
         with reading() as conn:
-            prefs = read_preferences(conn)
-            found = report_rows(conn, query, tz)
+            prefs = read_preferences(conn, uid)
+            found = report_rows(conn, uid, query, tz)
         text = render_csv(found, query.mode, query.dialect, levels, tz, prefs)
         return Response(
             "﻿" + text,  # BOM so Excel reads the file as UTF-8.
@@ -680,7 +872,9 @@ def now_ts():
 
 
 def fetch_item(conn, kind, item_id):
-    return dict(conn.execute(f"SELECT * FROM {kind} WHERE id = ?", (item_id,)).fetchone())
+    item = dict(conn.execute(f"SELECT * FROM {kind} WHERE id = ?", (item_id,)).fetchone())
+    item.pop("user_id", None)
+    return item
 
 
 def fetch_entry(conn, entry_id):
@@ -688,18 +882,33 @@ def fetch_entry(conn, entry_id):
     return serialize_entries(conn, [row])[0]
 
 
-def require_row(conn, table, row_id):
-    if conn.execute(f"SELECT id FROM {table} WHERE id = ?", (row_id,)).fetchone() is None:
+# Finds a row only if it belongs to the user; other users' rows look like they do not exist.
+OWNED_ROW = {
+    "customers": "SELECT id FROM customers WHERE id = ? AND user_id = ?",
+    "projects": """
+        SELECT p.id FROM projects p JOIN customers c ON c.id = p.customer_id
+        WHERE p.id = ? AND c.user_id = ?
+    """,
+    "entries": "SELECT id FROM entries WHERE id = ? AND user_id = ?",
+}
+
+
+def require_row(conn, table, row_id, user_id):
+    if conn.execute(OWNED_ROW[table], (row_id, user_id)).fetchone() is None:
         raise ApiError(f"Unknown {table[:-1]}.", 404 if table == "entries" else 400)
 
 
-def timer_payload(conn):
-    row = conn.execute("SELECT * FROM entries WHERE state != 'stopped'").fetchone()
+def timer_payload(conn, user_id):
+    row = conn.execute(
+        "SELECT * FROM entries WHERE user_id = ? AND state != 'stopped'", (user_id,)
+    ).fetchone()
     return {"active": serialize_entries(conn, [row])[0] if row else None, "now": now_ts()}
 
 
-def active_entry(conn, *states):
-    row = conn.execute("SELECT * FROM entries WHERE state != 'stopped'").fetchone()
+def active_entry(conn, user_id, *states):
+    row = conn.execute(
+        "SELECT * FROM entries WHERE user_id = ? AND state != 'stopped'", (user_id,)
+    ).fetchone()
     if row is None or row["state"] not in states:
         raise ApiError("The timer has changed. Reloaded the latest state.", 409)
     return row
@@ -807,8 +1016,8 @@ def day_start(day, tz):
     return int(datetime(day.year, day.month, day.day, tzinfo=tz).timestamp())
 
 
-def report_rows(conn, query, tz):
-    where, params = [], []
+def report_rows(conn, user_id, query, tz):
+    where, params = ["e.user_id = ?"], [user_id]
     if query.start_date:
         where.append("s.start_ts >= ?")
         params.append(day_start(query.start_date, tz))
@@ -830,7 +1039,7 @@ def report_rows(conn, query, tz):
         escaped = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         where.append("e.description LIKE ? ESCAPE '\\'")
         params.append(f"%{escaped}%")
-    clause = f"WHERE {' AND '.join(where)}" if where else ""
+    clause = f"WHERE {' AND '.join(where)}"
     return conn.execute(
         f"""
         SELECT s.start_ts, s.end_ts, e.id AS entry_id, e.description, e.billable,
@@ -1010,28 +1219,63 @@ def finish_children(node):
 # --- Command line ---
 
 
+USAGE = """Usage: python app.py <command>
+  add-user <email>          let this email address sign in (with a GitHub account that has it verified)
+  list-users
+  set-email <email> <new>   change a user's email; their GitHub link stays
+  disable-user <email>      block signing in and end the user's sessions
+  enable-user <email>
+  logout-user <email>       end the user's sessions everywhere
+  unlink-github <email>     let the user sign in with a different GitHub account
+  backup <destination-file> online SQLite backup, safe while the app runs"""
+
+
 def cli(argv):
-    usage = "Usage: python app.py set-password | python app.py backup <destination-file>"
-    if len(argv) == 1 and argv[0] == "set-password":
-        password = getpass.getpass("New password: ")
-        if len(password) < 8:
-            sys.exit("Use at least 8 characters.")
-        if password != getpass.getpass("Repeat password: "):
-            sys.exit("The passwords do not match.")
-        conn = init_db(db_path_from_env())
-        set_password(conn, password)
+    command, args = (argv[0], argv[1:]) if argv else ("", [])
+    arity = {
+        "add-user": 1, "list-users": 0, "set-email": 2, "disable-user": 1, "enable-user": 1,
+        "logout-user": 1, "unlink-github": 1, "backup": 1,
+    }
+    if arity.get(command) != len(args):
+        sys.exit(USAGE)
+    conn = init_db(db_path_from_env())
+    try:
+        if command == "backup":
+            destination = sqlite3.connect(args[0])
+            with destination:
+                conn.backup(destination)
+            destination.close()
+            print(f"Backed up to {args[0]}")
+        elif command == "list-users":
+            for user in conn.execute("SELECT * FROM users ORDER BY email"):
+                flags = [] if user["github_id"] is None else [f"GitHub {user['github_id']}"]
+                if user["disabled"]:
+                    flags.append("disabled")
+                print(user["email"] + (f" ({', '.join(flags)})" if flags else ""))
+        elif command == "add-user":
+            add_user(conn, args[0])
+            print(f"Added {args[0].strip()}. They can sign in with a GitHub account that has this email verified.")
+        else:
+            user = require_user(conn, args[0])
+            if command == "set-email":
+                new = normalize_email(args[1])
+                conn.execute("UPDATE users SET email = ? WHERE id = ?", (new, user["id"]))
+                print(f"{user['email']} is now {new}.")
+            elif command == "unlink-github":
+                conn.execute("UPDATE users SET github_id = NULL WHERE id = ?", (user["id"],))
+                print(f"{user['email']} can now sign in with any GitHub account that has it verified.")
+            else:
+                disabled = {"disable-user": 1, "enable-user": 0}.get(command, user["disabled"])
+                conn.execute(
+                    "UPDATE users SET disabled = ?, session_epoch = session_epoch + ? WHERE id = ?",
+                    (disabled, int(command != "enable-user"), user["id"]),
+                )
+                done = {"disable-user": "disabled and logged out", "enable-user": "enabled", "logout-user": "logged out everywhere"}
+                print(f"{user['email']} is {done[command]}.")
+    except (ValueError, sqlite3.IntegrityError) as err:
+        sys.exit(str(err))
+    finally:
         conn.close()
-        print("Password set. Existing sessions are logged out.")
-    elif len(argv) == 2 and argv[0] == "backup":
-        source = init_db(db_path_from_env())
-        destination = sqlite3.connect(argv[1])
-        with destination:
-            source.backup(destination)
-        destination.close()
-        source.close()
-        print(f"Backed up to {argv[1]}")
-    else:
-        sys.exit(usage)
 
 
 if __name__ == "__main__":

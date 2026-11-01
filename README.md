@@ -1,25 +1,41 @@
 # Timelog
 
-A single-user time tracker: Customer → Project, with each entry described in free text. Start/pause/stop, continue earlier work, manual entries, editing, and reports with grouping, filters and CSV export.
+A time tracker for a few people, each with their own separate data: Customer → Project, with each entry described in free text. Start/pause/stop, continue earlier work, manual entries, editing, and reports with grouping, filters and CSV export.
 
 Python (FastAPI), SQLite and plain JavaScript. All data is in one database file.
+
+## Signing in
+
+Users sign in with GitHub. Access is by invitation: `python app.py add-user someone@example.com` lets in a GitHub account that has that address **verified**. The first sign-in links the GitHub account to the user, so later email changes on GitHub do not matter. Users share nothing; each has their own customers, projects, entries and settings.
+
+Set up a GitHub OAuth app (GitHub → Settings → Developer settings → OAuth Apps) with the callback URL `https://<your-host>/auth/github/callback`, and put its client ID and secret in `.env` (copy `.env.example`).
+
+```sh
+python app.py add-user <email>          # invite
+python app.py list-users
+python app.py set-email <email> <new>   # change a user's email
+python app.py disable-user <email>      # block and log out; enable-user undoes it
+python app.py logout-user <email>       # end the user's sessions everywhere
+python app.py unlink-github <email>     # allow a different GitHub account
+```
+
+A database from before users existed is migrated on start: all its data goes to the user `owner@localhost`. Give that user your real email with `set-email`.
 
 ## Deploy on a VPS
 
 ```sh
+cp .env.example .env   # fill in the GitHub client ID and secret, and TIMELOG_BASE_URL
 docker compose up -d --build
-docker compose exec timelog python app.py set-password
+docker compose exec timelog python app.py add-user you@example.com
 ```
 
-The app listens on `127.0.0.1:8000`. Login cookies are HTTPS-only, so it needs an HTTPS reverse proxy. With Caddy:
+The app listens on `127.0.0.1:8000`. Session cookies are HTTPS-only, so it needs an HTTPS reverse proxy. With Caddy:
 
 ```
 time.example.com {
     reverse_proxy 127.0.0.1:8000
 }
 ```
-
-`TIMELOG_BEHIND_PROXY=1` (set in `compose.yml`) makes the login rate limit use the client address sent by the proxy. Only set it when the app is reachable solely through a proxy.
 
 ## Backups
 
@@ -35,20 +51,23 @@ This is safe while the app is running. To restore, stop the app and replace `tim
 ```sh
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt pytest httpx2
-export TIMELOG_INSECURE_COOKIES=1
-.venv/bin/python app.py set-password
+set -a; . ./.env; set +a                # GitHub client ID and secret
+export TIMELOG_INSECURE_COOKIES=1 TIMELOG_BASE_URL=http://localhost:8000
+.venv/bin/python app.py add-user you@example.com
 .venv/bin/uvicorn app:create_app --factory --host 0.0.0.0 --port 8000 --no-proxy-headers
 ```
 
-Run the tests with `.venv/bin/pytest`.
+The GitHub OAuth app needs `http://localhost:8000/auth/github/callback` as a second callback URL for this. Run the tests with `.venv/bin/pytest`.
 
 ## Settings
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `TIMELOG_DB` | `data/timelog.db` | Database file |
-| `TIMELOG_BEHIND_PROXY` | off | Trust one proxy's `X-Forwarded-*` headers |
-| `TIMELOG_INSECURE_COOKIES` | off | Allow login over plain HTTP, for local use only |
+| `TIMELOG_GITHUB_CLIENT_ID` | none | GitHub OAuth app's client ID |
+| `TIMELOG_GITHUB_CLIENT_SECRET` | none | GitHub OAuth app's client secret |
+| `TIMELOG_BASE_URL` | `http://localhost:8000` | Where users reach Timelog; the GitHub callback is built from it |
+| `TIMELOG_INSECURE_COOKIES` | off | Allow sessions over plain HTTP, for local use only |
 
 ## API docs
 

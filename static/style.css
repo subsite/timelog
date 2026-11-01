@@ -113,7 +113,7 @@ button, a.button {
   white-space: nowrap;
 }
 button:hover, a.button:hover { background: var(--hover); }
-button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); font-weight: 600; }
+button.primary, a.button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); font-weight: 600; }
 button.primary:hover { filter: brightness(1.08); background: var(--accent); }
 button.danger { color: var(--danger); }
 button.link { background: none; border: none; color: var(--muted); padding: 4px 6px; }
@@ -235,6 +235,8 @@ td.group-label.level-2 { padding-left: 58px; }
 .login-card { width: min(340px, 100%); padding: 24px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; }
 .login-card form { display: flex; flex-direction: column; gap: 12px; margin-top: 8px; }
 .login-card p { margin-top: 0; }
+.login-card a.button { display: block; text-align: center; text-decoration: none; margin-top: 8px; }
+#whoami { font-size: 13px; }
 
 @media (max-width: 680px) {
   .topbar { gap: 10px; padding: 8px 12px; }

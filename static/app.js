@@ -1452,4 +1452,5 @@ window.addEventListener("hashchange", navigate);
 guard(async () => {
   await loadPreferences();
   applyTimer(await api("/api/timer"));
+  document.getElementById("whoami").textContent = (await api("/api/me")).email;
 })().then(navigate);

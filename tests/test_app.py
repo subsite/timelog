@@ -6,6 +6,8 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from urllib.parse import parse_qs, urlparse
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -35,22 +37,83 @@ def clock(monkeypatch):
     return fake
 
 
+class FakeGitHub:
+    """Stands in for timelog.github_request: one GitHub account with some email addresses."""
+
+    def __init__(self):
+        self.account_id = 1001
+        self.emails = [("me@example.com", True)]
+        self.down = False
+
+    def __call__(self, url, token=None, data=None):
+        if self.down:
+            raise OSError("GitHub is down")
+        if url == timelog.GITHUB_TOKEN_URL:
+            assert data["client_id"] == "client-id" and data["client_secret"] == "client-secret"
+            assert data["redirect_uri"] == "http://testserver/auth/github/callback"
+            return {"access_token": "token"} if data["code"] == "good" else {"error": "bad_verification_code"}
+        assert token == "token"
+        if url == f"{timelog.GITHUB_API}/user":
+            return {"id": self.account_id, "login": "someone"}
+        if url == f"{timelog.GITHUB_API}/user/emails":
+            return [{"email": email, "verified": verified, "primary": False} for email, verified in self.emails]
+        raise AssertionError(url)
+
+
 @pytest.fixture
-def anon(tmp_path, monkeypatch):
+def github(monkeypatch):
+    fake = FakeGitHub()
+    monkeypatch.setattr(timelog, "github_request", fake)
+    return fake
+
+
+def make_client(path, monkeypatch, users=("me@example.com",), configured=True):
     monkeypatch.setenv("TIMELOG_INSECURE_COOKIES", "1")
-    path = tmp_path / "test.db"
+    monkeypatch.setenv("TIMELOG_BASE_URL", "http://testserver")
+    if configured:
+        monkeypatch.setenv("TIMELOG_GITHUB_CLIENT_ID", "client-id")
+        monkeypatch.setenv("TIMELOG_GITHUB_CLIENT_SECRET", "client-secret")
+    else:
+        monkeypatch.delenv("TIMELOG_GITHUB_CLIENT_ID", raising=False)
+        monkeypatch.delenv("TIMELOG_GITHUB_CLIENT_SECRET", raising=False)
     application = timelog.create_app(str(path))
     conn = timelog.connect(str(path))
-    timelog.set_password(conn, "correct horse")
+    for email in users:
+        timelog.add_user(conn, email)
     conn.close()
     return TestClient(application, follow_redirects=False)
 
 
+def sign_in(client, code="good"):
+    """Goes through GitHub sign-in; returns the callback's response."""
+    start = client.get("/auth/github")
+    state = parse_qs(urlparse(start.headers["location"]).query)["state"][0]
+    return client.get("/auth/github/callback", params={"code": code, "state": state})
+
+
+@pytest.fixture
+def anon(tmp_path, monkeypatch, github):
+    return make_client(tmp_path / "test.db", monkeypatch)
+
+
 @pytest.fixture
 def client(anon, clock):
-    response = anon.post("/login", data={"password": "correct horse"})
+    response = sign_in(anon)
     assert response.status_code == 303 and response.headers["location"] == "/"
     return anon
+
+
+@pytest.fixture
+def other(client, github, tmp_path):
+    """A second user, other@example.com, signed in on their own client."""
+    conn = timelog.connect(str(tmp_path / "test.db"))
+    timelog.add_user(conn, "other@example.com")
+    conn.close()
+    second = TestClient(client.app, follow_redirects=False)
+    github.account_id, github.emails = 2002, [("other@example.com", True)]
+    assert sign_in(second).headers["location"] == "/"
+    github.account_id, github.emails = 1001, [("me@example.com", True)]
+    return second
 
 
 def add_project(client, customer="Acme", project="Website"):
@@ -86,35 +149,6 @@ def test_requires_login(anon):
     assert response.status_code == 303 and response.headers["location"] == "/login"
 
 
-def test_login_is_rate_limited(anon):
-    for _ in range(timelog.MAX_LOGIN_FAILURES):
-        assert anon.post("/login", data={"password": "nope"}).headers["location"] == "/login?error=invalid"
-    # Even the right password is refused once locked.
-    assert anon.post("/login", data={"password": "correct horse"}).headers["location"] == "/login?error=locked"
-
-
-def test_forged_forwarded_address_cannot_dodge_rate_limit(tmp_path, monkeypatch):
-    monkeypatch.setenv("TIMELOG_INSECURE_COOKIES", "1")
-    monkeypatch.setenv("TIMELOG_BEHIND_PROXY", "1")
-    path = tmp_path / "proxy.db"
-    client = TestClient(timelog.create_app(str(path)), follow_redirects=False)
-    conn = timelog.connect(str(path))
-    timelog.set_password(conn, "correct horse")
-    conn.close()
-
-    def attempt(forwarded):
-        response = client.post(
-            "/login", data={"password": "nope"}, headers={"X-Forwarded-For": forwarded}
-        )
-        return response.headers["location"]
-
-    for number in range(timelog.MAX_LOGIN_FAILURES):
-        assert attempt(f"10.0.0.{number}, 203.0.113.9") == "/login?error=invalid"
-    assert attempt("10.9.9.9, 203.0.113.9") == "/login?error=locked"
-    # A different real client address is unaffected.
-    assert attempt("203.0.113.10") == "/login?error=invalid"
-
-
 def test_docs_and_schema_require_login(anon):
     assert anon.get("/docs").headers["location"] == "/login"
     assert anon.get("/openapi.json").headers["location"] == "/login"
@@ -122,32 +156,152 @@ def test_docs_and_schema_require_login(anon):
 
 def test_static_assets_and_login_page_are_public(anon):
     assert anon.get("/static/app.js").status_code == 200
-    assert anon.get("/login").status_code == 200
-    assert "Content-Security-Policy" in anon.get("/login").headers
+    page = anon.get("/login")
+    assert page.status_code == 200 and 'href="/auth/github"' in page.text
+    assert "Content-Security-Policy" in page.headers
 
 
-def test_no_password_means_no_login(tmp_path):
-    application = timelog.create_app(str(tmp_path / "fresh.db"))
-    client = TestClient(application, follow_redirects=False)
-    assert client.post("/login", data={"password": ""}).headers["location"] == "/login?error=invalid"
-    assert client.get("/api/tree").status_code == 401
+def test_sign_in_needs_github_settings(tmp_path, monkeypatch, github):
+    client = make_client(tmp_path / "bare.db", monkeypatch, configured=False)
+    assert "not set up" in client.get("/login").text
+    assert client.get("/auth/github").headers["location"] == "/login"
 
 
-def test_changing_password_logs_out_sessions(client, tmp_path):
+def test_sign_in_sends_user_to_github_with_state(anon):
+    location = anon.get("/auth/github").headers["location"]
+    url = urlparse(location)
+    query = parse_qs(url.query)
+    assert f"{url.scheme}://{url.netloc}{url.path}" == timelog.GITHUB_AUTHORIZE_URL
+    assert query["client_id"] == ["client-id"]
+    assert query["redirect_uri"] == ["http://testserver/auth/github/callback"]
+    assert query["scope"] == ["user:email"]
+    assert len(query["state"][0]) >= 32
+
+
+def test_sign_in_and_out(anon, github):
+    assert sign_in(anon).headers["location"] == "/"
+    assert anon.get("/api/me").json() == {"email": "me@example.com"}
+    anon.post("/logout")
+    assert anon.get("/api/me").status_code == 401
+
+
+def test_callback_needs_the_state_from_this_browser(anon, github):
+    def callback(**params):
+        return anon.get("/auth/github/callback", params={"code": "good", **params}).headers["location"]
+
+    assert callback(state="made-up") == "/login?error=expired"
+    anon.get("/auth/github")
+    assert callback(state="wrong") == "/login?error=expired"
+    # A state works once.
+    start = anon.get("/auth/github").headers["location"]
+    state = parse_qs(urlparse(start).query)["state"][0]
+    assert callback(state=state) == "/"
+    anon.post("/logout")
+    assert callback(state=state) == "/login?error=expired"
+    assert anon.get("/api/me").status_code == 401
+
+
+def test_cancelled_failed_and_bad_code_sign_ins(anon, github):
+    anon.get("/auth/github")
+    response = anon.get("/auth/github/callback", params={"error": "access_denied", "state": "x"})
+    assert response.headers["location"] == "/login?error=denied"
+    assert sign_in(anon, code="bad").headers["location"] == "/login?error=failed"
+    github.down = True
+    assert sign_in(anon).headers["location"] == "/login?error=failed"
+    assert anon.get("/api/me").status_code == 401
+
+
+def test_only_invited_verified_emails_get_in(anon, github):
+    github.emails = [("me@example.com", False), ("stranger@example.com", True)]
+    assert sign_in(anon).headers["location"] == "/login?error=noaccess"
+    github.emails = [("stranger@example.com", True), ("ME@example.com", True)]
+    assert sign_in(anon).headers["location"] == "/"
+
+
+def test_github_account_stays_linked(anon, github, tmp_path):
+    assert sign_in(anon).headers["location"] == "/"
+    # The email changes on GitHub: the linked account still signs in.
+    github.emails = [("new@example.com", True)]
+    assert sign_in(anon).headers["location"] == "/"
+    # Another GitHub account with the same email cannot take over the user.
+    github.account_id, github.emails = 3003, [("me@example.com", True)]
+    assert sign_in(anon).headers["location"] == "/login?error=noaccess"
     conn = timelog.connect(str(tmp_path / "test.db"))
-    timelog.set_password(conn, "another password")
+    assert conn.execute("SELECT github_id FROM users").fetchone()[0] == 1001
     conn.close()
+
+
+def test_disabling_or_logging_out_a_user_ends_sessions(client, github, tmp_path, monkeypatch):
+    monkeypatch.setenv("TIMELOG_DB", str(tmp_path / "test.db"))
+    timelog.cli(["logout-user", "me@example.com"])
     assert client.get("/api/tree").status_code == 401
+    assert sign_in(client).headers["location"] == "/"
+    timelog.cli(["disable-user", "me@example.com"])
+    assert client.get("/api/tree").status_code == 401
+    assert sign_in(client).headers["location"] == "/login?error=noaccess"
+    timelog.cli(["enable-user", "me@example.com"])
+    assert sign_in(client).headers["location"] == "/"
 
 
-def test_session_cookie_is_secure_by_default(tmp_path, monkeypatch):
-    monkeypatch.delenv("TIMELOG_INSECURE_COOKIES", raising=False)
+def test_session_cookie_is_secure_by_default(tmp_path, monkeypatch, github):
+    make_client(tmp_path / "secure.db", monkeypatch)
+    monkeypatch.delenv("TIMELOG_INSECURE_COOKIES")
     client = TestClient(timelog.create_app(str(tmp_path / "secure.db")), follow_redirects=False)
-    conn = timelog.connect(str(tmp_path / "secure.db"))
-    timelog.set_password(conn, "correct horse")
-    conn.close()
-    cookie = client.post("/login", data={"password": "correct horse"}).headers["set-cookie"].lower()
+    cookie = client.get("/auth/github").headers["set-cookie"].lower()
     assert "secure" in cookie and "httponly" in cookie and "samesite=lax" in cookie
+
+
+# --- Users are isolated ---
+
+
+def test_users_see_only_their_own_data(client, other, clock):
+    project_id = add_project(client)
+    customer_id = client.get("/api/tree").json()["customers"][0]["id"]
+    t = clock.value
+    entry = add_entry(client, project_id, (t - 3600, t - 1800), description="Mine")
+    client.post("/api/timer/start", json={"project_id": project_id})
+    client.put("/api/preferences", json={"currency": "SEK"})
+
+    assert other.get("/api/tree").json() == {"customers": [], "projects": []}
+    assert other.get("/api/entries").json()["entries"] == []
+    assert other.get("/api/recent").json() == []
+    assert other.get("/api/timer").json()["active"] is None
+    assert other.get("/api/report", params={"customer_id": customer_id}).json()["total"]["seconds"] == 0
+    assert other.get("/api/preferences").json()["currency"] == "EUR"
+    assert other.get("/api/me").json() == {"email": "other@example.com"}
+    assert "Mine" not in other.get("/api/report.csv").text
+
+
+def test_users_cannot_touch_each_others_data(client, other, clock):
+    project_id = add_project(client)
+    customer_id = client.get("/api/tree").json()["customers"][0]["id"]
+    t = clock.value
+    entry = add_entry(client, project_id, (t - 3600, t - 1800))
+    body = {"project_id": project_id, "segments": [{"start": t - 600, "end": t - 300}]}
+
+    assert other.put(f"/api/entries/{entry['id']}", json=body).status_code == 404
+    assert other.delete(f"/api/entries/{entry['id']}").status_code == 404
+    assert other.post("/api/entries", json=body).status_code == 400
+    assert other.post("/api/timer/start", json={"project_id": project_id}).status_code == 400
+    assert other.post("/api/projects", json={"name": "Sneaky", "customer_id": customer_id}).status_code == 400
+    for kind, item_id in (("customers", customer_id), ("projects", project_id)):
+        assert other.patch(f"/api/{kind}/{item_id}", json={"name": "Taken"}).status_code == 400
+        assert other.delete(f"/api/{kind}/{item_id}").status_code == 400
+    # Moving one's own entry onto someone else's project is refused too.
+    own = add_project(other, "Own", "Work")
+    own_entry = add_entry(other, own, (t - 3600, t - 1800))
+    assert other.put(f"/api/entries/{own_entry['id']}", json=body).status_code == 400
+    assert client.get(f"/api/tree").json()["projects"][0]["name"] == "Website"
+    assert len(client.get("/api/entries").json()["entries"]) == 1
+
+
+def test_users_have_their_own_names_and_timers(client, other, clock):
+    mine = add_project(client, "Acme", "Website")
+    theirs = add_project(other, "Acme", "Website")
+    client.post("/api/timer/start", json={"project_id": mine})
+    other.post("/api/timer/start", json={"project_id": theirs})
+    assert client.get("/api/timer").json()["active"]["project_id"] == mine
+    assert other.get("/api/timer").json()["active"]["project_id"] == theirs
 
 
 # --- Hierarchy ---
@@ -278,12 +432,14 @@ def test_pause_and_stop_within_same_second_leaves_nothing(client):
     assert client.get("/api/entries").json()["entries"] == []
 
 
-def test_only_one_active_entry_is_possible(tmp_path, client):
+def test_only_one_active_entry_per_user_is_possible(tmp_path, client, other):
     conn = timelog.connect(str(tmp_path / "test.db"))
     project_id = add_project(client)
-    conn.execute("INSERT INTO entries (project_id, state) VALUES (?, 'running')", (project_id,))
+    insert = "INSERT INTO entries (user_id, project_id, state) VALUES (?, ?, ?)"
+    conn.execute(insert, (1, project_id, "running"))
     with pytest.raises(sqlite3.IntegrityError):
-        conn.execute("INSERT INTO entries (project_id, state) VALUES (?, 'paused')", (project_id,))
+        conn.execute(insert, (1, project_id, "paused"))
+    conn.execute(insert, (2, add_project(other), "paused"))
     conn.close()
 
 
@@ -766,15 +922,15 @@ def test_tasks_are_migrated_into_descriptions(tmp_path):
 
     conn = timelog.init_db(str(path))
     assert [tuple(r) for r in conn.execute("SELECT * FROM entries ORDER BY id")] == [
-        (4, 2, "Design", 1, "stopped"),
-        (5, 2, "Design: Logo", 0, "running"),
+        (4, 1, 2, "Design", 1, "stopped"),
+        (5, 1, 2, "Design: Logo", 0, "running"),
     ]
     assert conn.execute("SELECT COUNT(*) FROM segments").fetchone()[0] == 2
     assert conn.execute("SELECT name FROM sqlite_master WHERE name = 'tasks'").fetchone() is None
     assert conn.execute("SELECT hourly_rate FROM customers").fetchone()[0] is None
     # Constraints still hold on the rebuilt table.
     with pytest.raises(sqlite3.IntegrityError):
-        conn.execute("INSERT INTO entries (project_id, state) VALUES (2, 'paused')")
+        conn.execute("INSERT INTO entries (user_id, project_id, state) VALUES (1, 2, 'paused')")
     with pytest.raises(sqlite3.IntegrityError):
         conn.execute("DELETE FROM projects WHERE id = 2")
     conn.execute("DELETE FROM entries WHERE id = 4")
@@ -791,7 +947,8 @@ def test_backup_command(tmp_path, monkeypatch, capsys):
     source = tmp_path / "source.db"
     monkeypatch.setenv("TIMELOG_DB", str(source))
     conn = timelog.init_db(str(source))
-    conn.execute("INSERT INTO customers (name) VALUES ('Acme')")
+    user_id = timelog.add_user(conn, "me@example.com")
+    conn.execute("INSERT INTO customers (user_id, name) VALUES (?, 'Acme')", (user_id,))
     conn.close()
     destination = tmp_path / "backup.db"
     timelog.cli(["backup", str(destination)])
@@ -800,10 +957,73 @@ def test_backup_command(tmp_path, monkeypatch, capsys):
     copy.close()
 
 
-def test_set_password_command(tmp_path, monkeypatch):
-    path = tmp_path / "pw.db"
+def test_user_commands(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("TIMELOG_DB", str(tmp_path / "users.db"))
+    timelog.cli(["add-user", " me@example.com "])
+    timelog.cli(["add-user", "you@example.com"])
+    timelog.cli(["disable-user", "you@example.com"])
+    timelog.cli(["set-email", "ME@example.com", "fredrik@example.com"])
+    capsys.readouterr()
+    timelog.cli(["list-users"])
+    assert capsys.readouterr().out.splitlines() == ["fredrik@example.com", "you@example.com (disabled)"]
+    for bad in (["add-user", "you@example.com"], ["add-user", "not an email"], ["disable-user", "nobody@example.com"],
+                ["set-email", "you@example.com", "fredrik@example.com"], ["set-password"], []):
+        with pytest.raises(SystemExit):
+            timelog.cli(bad)
+
+
+def test_single_user_database_moves_to_first_user(tmp_path, monkeypatch, github):
+    """The shape before users: global customers, entries without an owner, one password."""
+    path = tmp_path / "single.db"
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """
+        CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE customers (id INTEGER PRIMARY KEY, name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+            archived INTEGER NOT NULL DEFAULT 0,
+            hourly_rate REAL CHECK (hourly_rate IS NULL OR hourly_rate >= 0));
+        CREATE TABLE projects (id INTEGER PRIMARY KEY,
+            customer_id INTEGER NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+            name TEXT NOT NULL COLLATE NOCASE, archived INTEGER NOT NULL DEFAULT 0, UNIQUE (customer_id, name));
+        CREATE TABLE entries (id INTEGER PRIMARY KEY,
+            project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+            description TEXT NOT NULL DEFAULT '', billable INTEGER NOT NULL DEFAULT 1,
+            state TEXT NOT NULL DEFAULT 'stopped' CHECK (state IN ('running', 'paused', 'stopped')));
+        CREATE UNIQUE INDEX one_active_entry ON entries (state != 'stopped') WHERE state != 'stopped';
+        CREATE TABLE segments (id INTEGER PRIMARY KEY,
+            entry_id INTEGER NOT NULL REFERENCES entries(id) ON DELETE CASCADE,
+            start_ts INTEGER NOT NULL, end_ts INTEGER, CHECK (end_ts IS NULL OR end_ts > start_ts));
+        INSERT INTO settings VALUES ('secret_key', 'abc'), ('password_hash', 'salt$digest'),
+            ('preferences', '{"currency": "SEK", "round_minutes": 30}');
+        INSERT INTO customers VALUES (1, 'Acme', 0, 120.0);
+        INSERT INTO projects VALUES (2, 1, 'Website', 0);
+        INSERT INTO entries VALUES (4, 2, 'Fix', 1, 'stopped'), (5, 2, 'Logo', 0, 'running');
+        INSERT INTO segments VALUES (6, 4, 1800000000, 1800000600), (7, 5, 1800001000, NULL);
+        """
+    )
+    conn.close()
+
+    conn = timelog.init_db(str(path))
+    assert [tuple(r) for r in conn.execute("SELECT id, email, github_id FROM users")] == [(1, timelog.FIRST_USER_EMAIL, None)]
+    assert timelog.read_preferences(conn, 1).currency == "SEK"
+    assert [tuple(r) for r in conn.execute("SELECT * FROM customers")] == [(1, 1, "Acme", 0, 120.0)]
+    assert [tuple(r) for r in conn.execute("SELECT id, user_id, state FROM entries ORDER BY id")] == [
+        (4, 1, "stopped"), (5, 1, "running"),
+    ]
+    assert conn.execute("SELECT COUNT(*) FROM segments").fetchone()[0] == 2
+    assert timelog.get_setting(conn, "password_hash") is None and timelog.get_setting(conn, "secret_key") == "abc"
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("INSERT INTO entries (user_id, project_id, state) VALUES (1, 2, 'paused')")
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("DELETE FROM projects WHERE id = 2")
+    conn.close()
+    timelog.init_db(str(path)).close()  # Running it again is harmless.
+
+    # The owner gets their real email and signs in to their old data.
     monkeypatch.setenv("TIMELOG_DB", str(path))
-    monkeypatch.setattr(timelog.getpass, "getpass", lambda _prompt: "long enough")
-    timelog.cli(["set-password"])
-    client = TestClient(timelog.create_app(str(path)), follow_redirects=False)
-    assert client.post("/login", data={"password": "long enough"}).headers["location"] == "/"
+    timelog.cli(["set-email", timelog.FIRST_USER_EMAIL, "me@example.com"])
+    client = make_client(path, monkeypatch, users=())
+    assert sign_in(client).headers["location"] == "/"
+    assert client.get("/api/tree").json()["customers"][0]["name"] == "Acme"
+    assert client.get("/api/timer").json()["active"]["description"] == "Logo"
+    assert client.get("/api/preferences").json()["round_minutes"] == 30
