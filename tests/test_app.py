@@ -599,10 +599,11 @@ def set_prefs(client, **prefs):
 def test_preferences_default_save_and_validate(client):
     assert client.get("/api/preferences").json() == {
         "theme": "system", "date_format": "iso", "round_minutes": 0, "round_scope": "entry", "default_rate": 0,
+        "currency": "EUR",
     }
-    saved = set_prefs(client, theme="dark", date_format="locale", round_minutes=30, round_scope="day")
+    saved = set_prefs(client, theme="dark", date_format="locale", round_minutes=30, round_scope="day", currency="SEK")
     assert client.get("/api/preferences").json() == saved
-    for bad in ({"theme": "pink"}, {"round_minutes": 7}, {"round_scope": "week"}, {"round_minutes": "30"}, {"default_rate": -1}):
+    for bad in ({"theme": "pink"}, {"round_minutes": 7}, {"round_scope": "week"}, {"round_minutes": "30"}, {"default_rate": -1}, {"currency": "XYZ"}, {"currency": "eur"}):
         assert client.put("/api/preferences", json=bad).status_code == 400
     assert client.get("/api/preferences").json() == saved
 
@@ -625,6 +626,23 @@ def test_billable_rounding_per_entry(client):
     assert data["groups"][0]["billable_seconds"] == 90 * 60
     set_prefs(client, round_minutes=30, round_scope="day")
     assert report(client)["total"]["billable_seconds"] == 60 * 60
+
+
+def test_billable_rounding_per_project(client):
+    website = add_project(client, "Acme", "Website")
+    support = add_project(client, "Acme", "Support")
+    # Website: 10 min on two days with different descriptions; Support: 5 min.
+    add_entry(client, website, (ts(2026, 10, 12, 9), ts(2026, 10, 12, 9, 10)), description="Fix")
+    add_entry(client, website, (ts(2026, 10, 13, 9), ts(2026, 10, 13, 9, 10)), description="Deploy")
+    add_entry(client, support, (ts(2026, 10, 13, 10), ts(2026, 10, 13, 10, 5)))
+    set_prefs(client, round_minutes=30, round_scope="day")
+    assert report(client)["total"]["billable_seconds"] == 90 * 60
+    set_prefs(client, round_minutes=30, round_scope="project")
+    data = report(client, group="project")
+    assert data["total"]["billable_seconds"] == 60 * 60
+    assert sorted(g["billable_seconds"] for g in data["groups"]) == [30 * 60, 30 * 60]
+    # Any grouping adds up to the same rounded total.
+    assert sum(g["billable_seconds"] for g in report(client, group="day")["groups"]) == 60 * 60
 
 
 def test_billable_rounding_counts_paused_entry_once(client):

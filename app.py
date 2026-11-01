@@ -145,15 +145,25 @@ class EntryWrite(Body):
     segments: list[Segment]
 
 
+CURRENCIES = (
+    "EUR", "USD", "GBP", "SEK", "NOK", "DKK", "ISK", "CHF", "PLN", "CZK", "HUF", "RON", "BGN",
+    "CAD", "AUD", "NZD", "JPY", "CNY", "INR", "BRL", "MXN", "ZAR", "SGD", "HKD", "KRW", "TRY",
+    "UAH", "ILS",
+)
+
+
 class Preferences(Body):
     theme: Literal["system", "light", "dark"] = "system"
     date_format: Literal["iso", "locale"] = "iso"
     # Billable time is rounded up to the next started step; 0 turns rounding off.
     round_minutes: Literal[0, 5, 6, 10, 15, 30, 60] = 0
-    # What one billed unit is: each entry, or each day's work on one project and description.
-    round_scope: Literal["entry", "day"] = "entry"
+    # What one billed unit is: each entry, each day's work on one project and description,
+    # or each project's whole time in the report.
+    round_scope: Literal["entry", "day", "project"] = "entry"
     # Used for customers without their own rate.
     default_rate: Rate = 0
+    # Only shown in the interface; amounts are plain numbers.
+    currency: Literal[CURRENCIES] = "EUR"
 
 
 class ReportQuery(BaseModel):
@@ -899,8 +909,9 @@ def row_seconds(row, now):
 def billable_amounts(found, prefs, tz, now):
     """Billable seconds per report row, after rounding each billed unit up to a started step.
 
-    A unit is an entry, or one day's work on a project with one description. Its rounding is
-    added to its first row, so groups and totals add up to the rounded amounts."""
+    A unit is an entry, one day's work on a project with one description, or a project's whole
+    time in the report. Its rounding is added to its first row, so groups and totals add up to
+    the rounded amounts."""
     amounts = [row_seconds(row, now) if row["billable"] else 0 for row in found]
     step = prefs.round_minutes * 60
     if not step:
@@ -911,6 +922,8 @@ def billable_amounts(found, prefs, tz, now):
             continue
         if prefs.round_scope == "entry":
             key = row["entry_id"]
+        elif prefs.round_scope == "project":
+            key = row["project_id"]
         else:
             day = datetime.fromtimestamp(row["start_ts"], tz).date()
             key = (day, row["project_id"], row["description"])

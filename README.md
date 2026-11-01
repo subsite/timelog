@@ -56,9 +56,9 @@ Interactive docs are at `/docs` once you are logged in, and the schema is at `/o
 
 ## Settings in the app
 
-Under **Settings**: theme (system, day, night), date format (ISO or the browser's locale), billing rounding and a default hourly rate. A customer's own rate is set under **Manage → Edit**. The currency follows the browser's locale for now.
+Under **Settings**: theme (system, day, night), date format (ISO or the browser's locale), billing rounding, currency (EUR by default) and a default hourly rate. A customer's own rate is set under **Manage → Edit**. The currency is only a display label: amounts are plain numbers, and CSV exports have no currency.
 
-Billing rounding rounds billable time up to the next started step (for example 30 minutes), either per entry or per day's work on one project and description. It changes billable hours and amounts in reports and CSV exports, never the tracked time.
+Billing rounding rounds billable time up to the next started step (for example 30 minutes), per entry, per day's work on one project and description, or per project (its whole time in the report's date range). It changes billable hours and amounts in reports and CSV exports, never the tracked time.
 
 ## How time is counted
 

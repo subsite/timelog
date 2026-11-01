@@ -3,7 +3,7 @@
 const S = {
   tree: { customers: [], projects: [] },
   recent: [],
-  prefs: { theme: "system", date_format: "iso", round_minutes: 0, round_scope: "entry", default_rate: 0 },
+  prefs: { theme: "system", date_format: "iso", round_minutes: 0, round_scope: "entry", default_rate: 0, currency: "EUR" },
   active: null,
   offset: 0,
   route: "timer",
@@ -79,23 +79,24 @@ function fmtHM(seconds) {
 
 const fmtDecimal = (seconds) => (seconds / 3600).toFixed(2);
 
-// The currency follows the browser locale's region for now (fi-FI → EUR, en-US → USD).
-const EURO_REGIONS = "AT BE CY DE EE ES FI FR GR HR IE IT LT LU LV MT NL PT SI SK AX".split(" ");
-const REGION_CURRENCY = {
-  US: "USD", GB: "GBP", SE: "SEK", NO: "NOK", DK: "DKK", IS: "ISK", CH: "CHF", PL: "PLN", CZ: "CZK",
-  HU: "HUF", RO: "RON", BG: "BGN", CA: "CAD", AU: "AUD", NZ: "NZD", JP: "JPY", CN: "CNY", IN: "INR",
-  BR: "BRL", MX: "MXN", ZA: "ZAR", SG: "SGD", HK: "HKD", KR: "KRW", TR: "TRY", UA: "UAH", IL: "ILS",
-};
-const CURRENCY = (() => {
+// The currency is a setting; the same list is CURRENCIES in app.py.
+const CURRENCIES = (
+  "EUR USD GBP SEK NOK DKK ISK CHF PLN CZK HUF RON BGN CAD AUD NZD JPY CNY INR BRL MXN ZAR SGD HKD KRW TRY UAH ILS"
+).split(" ");
+const currency = () => S.prefs.currency;
+const currencyName = (code) => {
   try {
-    const region = new Intl.Locale(navigator.language).maximize().region;
-    return EURO_REGIONS.includes(region) ? "EUR" : REGION_CURRENCY[region] || "EUR";
+    return `${code} – ${new Intl.DisplayNames(undefined, { type: "currency" }).of(code)}`;
   } catch {
-    return "EUR";
+    return code;
   }
-})();
-const money = new Intl.NumberFormat(undefined, { style: "currency", currency: CURRENCY });
-const fmtMoney = (amount) => money.format(amount);
+};
+const moneyFormats = {};
+const fmtMoney = (amount) => {
+  const code = currency();
+  moneyFormats[code] ??= new Intl.NumberFormat(undefined, { style: "currency", currency: code });
+  return moneyFormats[code].format(amount);
+};
 
 // Amounts are shown once any hourly rate has been set.
 const hasRates = () => S.prefs.default_rate > 0 || S.tree.customers.some((c) => c.hourly_rate !== null);
@@ -292,7 +293,7 @@ function editCustomer(customer) {
         },
         h("h2", {}, "Edit customer"),
         h("label", {}, "Name", name),
-        h("label", {}, `Hourly rate (${CURRENCY})`, rate),
+        h("label", {}, `Hourly rate (${currency()})`, rate),
         h("p", { class: "hint" }, "Leave empty to use the default rate from Settings."),
         h(
           "div",
@@ -1123,7 +1124,7 @@ async function showReports() {
             h("strong", {}, fmtDecimal(data.total.billable_seconds)),
             S.prefs.round_minutes ? h("small", { class: "muted" }, roundingNote()) : null
           ),
-          showAmount ? h("div", {}, h("span", {}, `Amount (${CURRENCY})`), h("strong", {}, fmtMoney(data.total.amount))) : null
+          showAmount ? h("div", {}, h("span", {}, `Amount (${currency()})`), h("strong", {}, fmtMoney(data.total.amount))) : null
         ),
         data.total.seconds === 0
           ? h("p", { class: "empty" }, "No time matches these filters.")
@@ -1278,12 +1279,22 @@ async function loadPreferences() {
 }
 
 function roundingNote() {
-  const unit = S.prefs.round_scope === "day" ? "per day, project and description" : "per entry";
+  const unit = {
+    entry: "per entry",
+    day: "per day, project and description",
+    project: "per project",
+  }[S.prefs.round_scope];
   return `Rounded up to started ${S.prefs.round_minutes} min ${unit}`;
 }
 
 async function showSettings() {
   const status = h("p", { class: "hint", role: "status" });
+  const rateText = h("span");
+  const refresh = () => {
+    applyTheme(S.prefs.theme);
+    scope.disabled = !S.prefs.round_minutes;
+    rateText.textContent = `Default hourly rate (${currency()})`;
+  };
 
   function choice(key, label, options) {
     const el = h("select", {}, options.map(([value, text]) => h("option", { value: String(value) }, text)));
@@ -1293,8 +1304,7 @@ async function showSettings() {
       guard(async () => {
         const value = key === "round_minutes" ? Number(el.value) : el.value;
         S.prefs = await api("/api/preferences", "PUT", { ...S.prefs, [key]: value });
-        applyTheme(S.prefs.theme);
-        scope.disabled = !S.prefs.round_minutes;
+        refresh();
         status.textContent = "Saved.";
       })
     );
@@ -1313,10 +1323,11 @@ async function showSettings() {
   const unit = choice("round_scope", "Round each", [
     ["entry", "Entry"],
     ["day", "Day's work on one project and description"],
+    ["project", "Project (its total in the report)"],
   ]);
   const scope = unit.el;
-  scope.disabled = !S.prefs.round_minutes;
 
+  const money = choice("currency", "Currency", CURRENCIES.map((code) => [code, currencyName(code)]));
   const rate = h("input", { type: "number", min: "0", step: "0.01", value: S.prefs.default_rate || "", placeholder: "0", inputMode: "decimal" });
   rate.addEventListener(
     "change",
@@ -1331,6 +1342,7 @@ async function showSettings() {
     })
   );
 
+  refresh();
   view.replaceChildren(
     h("h1", {}, "Settings"),
     h(
@@ -1342,17 +1354,19 @@ async function showSettings() {
         {},
         h("legend", {}, "Billing"),
         h("div", { class: "two" }, step.label, unit.label),
+        h("div", { class: "two" }, money.label, h("p", { class: "hint align-end" }, "Used when showing rates and amounts.")),
         h(
           "div",
           { class: "two" },
-          h("label", {}, `Default hourly rate (${CURRENCY})`, rate),
+          h("label", {}, rateText, rate),
           h("p", { class: "hint align-end" }, "Customers without their own rate use this. Set a customer's rate under Manage → Edit.")
         ),
         h(
           "p",
           { class: "hint" },
           "Rounding changes billable hours and amounts in reports and CSV exports. Tracked time is never changed. ",
-          "Rounding by day adds up short sessions on the same work before rounding, so 3 × 10 minutes bills as one started 30 minutes."
+          "Rounding by day adds up short sessions on the same work before rounding, so 3 × 10 minutes bills as one started 30 minutes. ",
+          "Rounding by project adds up all of a project's time in the report's date range and rounds it once."
         )
       ),
       status
