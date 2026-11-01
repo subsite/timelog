@@ -346,6 +346,164 @@ def test_export_holds_only_the_users_data(client, other, clock, tmp_path, monkey
 def test_export_requires_login(anon):
     assert anon.get("/api/export.sqlite").status_code == 401
 
+
+# --- Import from Clockify ---
+
+
+def iso(timestamp):
+    return datetime.fromtimestamp(timestamp, ZoneInfo("UTC")).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+class FakeClockify:
+    """Stands in for timelog.clockify_request: one user's workspace with some time entries."""
+
+    def __init__(self):
+        self.key = "clockify-key"
+        self.region_url = timelog.CLOCKIFY_REGIONS["global"]
+        self.clients = {"c1": ("Acme", False), "c2": ("Old Client", True)}
+        self.entries = []
+        self.calls = []
+        self.down = False
+
+    def entry(self, entry_id, start, end, description="", project=None, client=None, task=None, billable=True):
+        project_obj = None
+        if project:
+            project_obj = {"id": f"p-{project}", "name": project, "clientId": client}
+        self.entries.append({
+            "id": entry_id,
+            "description": description,
+            "billable": billable,
+            "project": project_obj,
+            "task": {"id": "t", "name": task} if task else None,
+            "timeInterval": {"start": iso(start), "end": iso(end) if end else None, "duration": None},
+        })
+
+    def __call__(self, base_url, path, api_key, params=None):
+        self.calls.append(path)
+        if self.down:
+            raise timelog.ClockifyError("Could not reach Clockify. Try again in a moment.")
+        if api_key != self.key or base_url != self.region_url:
+            raise timelog.ClockifyError("Clockify did not accept the API key.")
+        if path == "/user":
+            return {"id": "u1", "activeWorkspace": "w1", "defaultWorkspace": "w1"}
+        if path == "/workspaces":
+            return [{"id": "w0", "name": "Other"}, {"id": "w1", "name": "My workspace"}]
+        if path == "/workspaces/w1/clients":
+            archived = params["archived"] == "true"
+            return [{"id": cid, "name": name} for cid, (name, arch) in self.clients.items() if arch == archived]
+        if path == "/workspaces/w1/user/u1/time-entries":
+            assert params["hydrated"] == "true"
+            size, page = params["page-size"], params["page"]
+            return self.entries[(page - 1) * size: page * size]
+        raise AssertionError(path)
+
+
+@pytest.fixture
+def clockify(monkeypatch):
+    fake = FakeClockify()
+    monkeypatch.setattr(timelog, "clockify_request", fake)
+    return fake
+
+
+def clockify_import(client, dry_run, key="clockify-key", region="global"):
+    return client.post("/api/import/clockify", json={"api_key": key, "region": region, "dry_run": dry_run})
+
+
+def test_clockify_preview_then_import(client, clockify, clock):
+    t = ts(2026, 3, 2, 9)
+    clockify.entry("e1", t, t + 3600, "Fix login", project="Website", client="c1", task="Bugs")
+    clockify.entry("e2", t + 7200, t + 9000, "", project="Website", client="c1", task="Bugs")
+    clockify.entry("e3", t + 86400, t + 90000, "Call", project="Legacy", client="c2", billable=False)
+    clockify.entry("e4", t + 172800, t + 174600, "Admin", project="Internal")
+    clockify.entry("e5", t + 259200, t + 261000, "Unsorted")
+    clockify.entry("e6", t + 300000, None, "Still running", project="Website", client="c1")
+    clockify.entry("e7", t + 400000, t + 400000, "Zero length", project="Website", client="c1")
+
+    preview = clockify_import(client, True).json()
+    assert preview == {
+        "workspace": "My workspace", "found": 7, "running": 1, "invalid": 1,
+        "first": t, "last": t + 259200, "dry_run": True,
+        "entries": 5, "already_imported": 0,
+        "new_customers": ["(no client)", "Acme", "Old Client"],
+        "new_projects": ["(no client) / (no project)", "(no client) / Internal", "Acme / Website", "Old Client / Legacy"],
+    }
+    assert client.get("/api/tree").json()["customers"] == []
+
+    result = clockify_import(client, False).json()
+    assert result["entries"] == 5 and not result["dry_run"]
+    tree = client.get("/api/tree").json()
+    assert sorted(c["name"] for c in tree["customers"]) == ["(no client)", "Acme", "Old Client"]
+    entries = client.get("/api/entries").json()["entries"]
+    by_text = {e["description"]: e for e in entries}
+    assert set(by_text) == {"Bugs: Fix login", "Bugs", "Call", "Admin", "Unsorted"}
+    assert by_text["Bugs: Fix login"]["segments"] == [{"start": t, "end": t + 3600}]
+    assert by_text["Call"]["billable"] is False and by_text["Bugs"]["state"] == "stopped"
+    report = client.get("/api/report", params={"tz": "Europe/Helsinki"}).json()
+    assert report["total"]["seconds"] == 3600 + 1800 + 3600 + 1800 + 1800
+
+    # Importing again adds nothing; a new Clockify entry is picked up.
+    clockify.entry("e8", t + 500000, t + 503600, "New work", project="Website", client="c1")
+    again = clockify_import(client, False).json()
+    assert again["entries"] == 1 and again["already_imported"] == 5
+    assert again["new_customers"] == [] and again["new_projects"] == []
+    assert len(client.get("/api/entries").json()["entries"]) == 6
+
+
+def test_clockify_import_reuses_existing_names(client, clockify):
+    existing = add_project(client, "ACME", "website")
+    client.patch(f"/api/projects/{existing}", json={"archived": True})
+    t = ts(2026, 3, 2, 9)
+    clockify.entry("e1", t, t + 600, "Fix", project="Website", client="c1")
+    result = clockify_import(client, False).json()
+    assert result["new_customers"] == [] and result["new_projects"] == []
+    assert client.get("/api/entries").json()["entries"][0]["project_id"] == existing
+
+
+def test_clockify_import_pages_through_entries(client, clockify, monkeypatch):
+    monkeypatch.setattr(timelog, "CLOCKIFY_PAGE_SIZE", 2)
+    t = ts(2026, 3, 2, 9)
+    for n in range(5):
+        clockify.entry(f"e{n}", t + n * 3600, t + n * 3600 + 600, f"Work {n}", project="Website", client="c1")
+    assert clockify_import(client, False).json()["entries"] == 5
+    assert clockify.calls.count("/workspaces/w1/user/u1/time-entries") == 3
+
+
+def test_clockify_import_errors(client, clockify):
+    response = clockify_import(client, True, key="wrong")
+    assert response.status_code == 502 and "API key" in response.json()["error"]
+    clockify.region_url = timelog.CLOCKIFY_REGIONS["euc1"]
+    assert clockify_import(client, True).status_code == 502
+    assert clockify_import(client, True, region="euc1").status_code == 200
+    clockify.down = True
+    assert "reach Clockify" in clockify_import(client, True, region="euc1").json()["error"]
+    for bad in ({"api_key": ""}, {"api_key": "k", "region": "mars"}, {"api_key": "k", "dry_run": "no"}):
+        assert client.post("/api/import/clockify", json=bad).status_code == 400
+
+
+def test_clockify_import_is_per_user(client, other, clockify):
+    t = ts(2026, 3, 2, 9)
+    clockify.entry("e1", t, t + 600, "Fix", project="Website", client="c1")
+    assert clockify_import(client, False).json()["entries"] == 1
+    # The same Clockify entries can go into another user's account; neither sees the other's.
+    assert clockify_import(other, False).json()["entries"] == 1
+    assert len(client.get("/api/entries").json()["entries"]) == 1
+    assert len(other.get("/api/entries").json()["entries"]) == 1
+
+
+def test_imported_entries_stay_recognised_after_export(client, clockify, tmp_path, monkeypatch, github):
+    t = ts(2026, 3, 2, 9)
+    clockify.entry("e1", t, t + 600, "Fix", project="Website", client="c1")
+    clockify_import(client, False)
+    exported = tmp_path / "moved.db"
+    exported.write_bytes(client.get("/api/export.sqlite").content)
+    elsewhere = make_client(exported, monkeypatch, users=())
+    sign_in(elsewhere)
+    assert clockify_import(elsewhere, True).json()["already_imported"] == 1
+
+
+def test_import_requires_login(anon):
+    assert anon.post("/api/import/clockify", json={"api_key": "k"}).status_code == 401
+
 # --- Hierarchy ---
 
 
@@ -964,8 +1122,8 @@ def test_tasks_are_migrated_into_descriptions(tmp_path):
 
     conn = timelog.init_db(str(path))
     assert [tuple(r) for r in conn.execute("SELECT * FROM entries ORDER BY id")] == [
-        (4, 1, 2, "Design", 1, "stopped"),
-        (5, 1, 2, "Design: Logo", 0, "running"),
+        (4, 1, 2, "Design", 1, "stopped", None),
+        (5, 1, 2, "Design: Logo", 0, "running", None),
     ]
     assert conn.execute("SELECT COUNT(*) FROM segments").fetchone()[0] == 2
     assert conn.execute("SELECT name FROM sqlite_master WHERE name = 'tasks'").fetchone() is None

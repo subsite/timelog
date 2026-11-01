@@ -1432,6 +1432,7 @@ async function showSettings() {
         ),
         h("p", {}, h("a", { class: "button", href: "/api/export.sqlite", download: "" }, "Download my data (SQLite)"))
       ),
+      clockifyImport(),
       h(
         "fieldset",
         {},
@@ -1456,6 +1457,96 @@ async function showSettings() {
 }
 
 const REPO_URL = "https://github.com/subsite/timelog";
+
+// Settings → Import from Clockify: preview what would be imported, then import it.
+function clockifyImport() {
+  const key = h("input", { type: "password", autocomplete: "off", spellcheck: false, placeholder: "Paste the key here" });
+  const region = h(
+    "select",
+    {},
+    [["global", "Global (most workspaces)"], ["euc1", "EU (Germany)"], ["use2", "USA"], ["euw2", "UK"], ["apse2", "Australia"]].map(
+      ([value, text]) => h("option", { value }, text)
+    )
+  );
+  const previewButton = h("button", { type: "button" }, "Preview");
+  const result = h("div", { class: "import-result", role: "status" });
+
+  async function send(dryRun) {
+    if (!key.value.trim()) {
+      key.focus();
+      return null;
+    }
+    previewButton.disabled = true;
+    result.querySelectorAll("button").forEach((b) => (b.disabled = true));
+    result.prepend(h("p", { class: "hint" }, "Fetching your entries from Clockify…"));
+    try {
+      return await api("/api/import/clockify", "POST", { api_key: key.value, region: region.value, dry_run: dryRun });
+    } catch (err) {
+      result.replaceChildren(h("p", { class: "form-error" }, err.message));
+      return null;
+    } finally {
+      previewButton.disabled = false;
+    }
+  }
+
+  const names = (label, list) =>
+    list.length ? h("p", {}, `${label} (${list.length}): `, h("span", { class: "muted" }, list.join(", "))) : null;
+
+  async function preview() {
+    const data = await send(true);
+    if (!data) return;
+    const range = data.first ? ` from ${fmtDate(data.first)} to ${fmtDate(data.last)}` : "";
+    const skipped = [
+      data.already_imported ? `${data.already_imported} already imported` : null,
+      data.running ? `${data.running} running timer` : null,
+      data.invalid ? `${data.invalid} without valid times` : null,
+    ].filter(Boolean);
+    const importButton = h("button", { type: "button", class: "primary" }, `Import ${data.entries} entries`);
+    importButton.addEventListener("click", guard(runImport));
+    result.replaceChildren(
+      h("p", {}, `Workspace ${data.workspace ? `“${data.workspace}”` : ""}: ${data.found} entries${range}.`),
+      h("p", {}, h("strong", {}, `${data.entries} to import`), skipped.length ? `; skipped: ${skipped.join(", ")}.` : "."),
+      names("New customers", data.new_customers),
+      names("New projects", data.new_projects),
+      data.entries ? h("p", {}, importButton) : h("p", { class: "hint" }, "Nothing new to import.")
+    );
+  }
+
+  async function runImport() {
+    const data = await send(false);
+    if (!data) return;
+    key.value = "";
+    await loadTree();
+    result.replaceChildren(
+      h("p", {}, h("strong", {}, `Imported ${data.entries} entries`), data.new_customers.length || data.new_projects.length
+        ? `, with ${data.new_customers.length} new customers and ${data.new_projects.length} new projects.`
+        : "."),
+      h("p", { class: "hint" }, "You can now delete the API key in Clockify. Set hourly rates for the new customers under Manage.")
+    );
+  }
+
+  previewButton.addEventListener("click", guard(preview));
+  return h(
+    "fieldset",
+    {},
+    h("legend", {}, "Import from Clockify"),
+    h(
+      "p",
+      {},
+      "Copy your time entries from Clockify into Timelog. In Clockify, create an API key under Preferences → Advanced → Manage API keys and paste it here. ",
+      "The key is used for this import only and is not saved. Entries imported before are skipped, so you can import again later."
+    ),
+    h(
+      "div",
+      { class: "two" },
+      h("label", {}, "Clockify API key", key),
+      h("label", {}, "Workspace region", region)
+    ),
+    h("p", { class: "hint" }, "Choose a region only if your Clockify workspace is stored in one. If the key is not accepted, try your region."),
+    h("p", {}, previewButton),
+    result
+  );
+}
 
 // --- Routing and clock ---
 

@@ -10,6 +10,7 @@ import sqlite3
 import sys
 import tempfile
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from contextlib import contextmanager
@@ -49,6 +50,8 @@ CREATE TABLE IF NOT EXISTS projects (
 CREATE UNIQUE INDEX IF NOT EXISTS one_active_entry_per_user ON entries (user_id)
     WHERE state != 'stopped';
 CREATE INDEX IF NOT EXISTS entries_user ON entries (user_id);
+CREATE UNIQUE INDEX IF NOT EXISTS entries_source ON entries (user_id, source_id)
+    WHERE source_id IS NOT NULL;
 -- An entry's duration is the sum of its segments; pausing closes a segment.
 CREATE TABLE IF NOT EXISTS segments (
     id INTEGER PRIMARY KEY,
@@ -97,7 +100,9 @@ CREATE TABLE IF NOT EXISTS {name} (
     project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
     description TEXT NOT NULL DEFAULT '',
     billable INTEGER NOT NULL DEFAULT 1,
-    state TEXT NOT NULL DEFAULT 'stopped' CHECK (state IN ('running', 'paused', 'stopped'))
+    state TEXT NOT NULL DEFAULT 'stopped' CHECK (state IN ('running', 'paused', 'stopped')),
+    -- Where an imported entry came from, e.g. "clockify:<id>", so importing again skips it.
+    source_id TEXT
 );
 """
 SCHEMA = SCHEMA.replace("{users}", USERS_TABLE)
@@ -121,6 +126,19 @@ EMAIL_PATTERN = r"[^@\s]+@[^@\s]+"
 GITHUB_AUTHORIZE_URL = "https://github.com/login/oauth/authorize"
 GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token"
 GITHUB_API = "https://api.github.com"
+
+# Clockify keeps each workspace in one region, and its API answers only at that region's address.
+CLOCKIFY_REGIONS = {
+    "global": "https://api.clockify.me/api/v1",
+    "euc1": "https://euc1.clockify.me/api/v1",
+    "use2": "https://use2.clockify.me/api/v1",
+    "euw2": "https://euw2.clockify.me/api/v1",
+    "apse2": "https://apse2.clockify.me/api/v1",
+}
+CLOCKIFY_PAGE_SIZE = 5000  # The most Clockify returns per request; the free plan allows 30 an hour.
+CLOCKIFY_MAX_PAGES = 100
+NO_CLIENT = "(no client)"
+NO_PROJECT = "(no project)"
 
 TIME_GROUPS = {"day", "week", "month"}
 GROUPS = TIME_GROUPS | {"customer", "project", "description"}
@@ -182,6 +200,14 @@ class TimerStart(Body):
 class Segment(Body):
     start: Timestamp
     end: Timestamp | None = None
+
+
+class ClockifyImport(Body):
+    # Used for this request only, never stored.
+    api_key: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
+    region: Literal["global", "euc1", "use2", "euw2", "apse2"] = "global"
+    # Only count what would be imported.
+    dry_run: bool = True
 
 
 class EntryWrite(Body):
@@ -254,6 +280,7 @@ def init_db(path):
     migrate_tasks_into_descriptions(conn)
     add_customer_rate_column(conn)
     migrate_to_users(conn)
+    add_entry_source_column(conn)
     conn.executescript(SCHEMA)
     conn.execute(
         "INSERT OR IGNORE INTO settings (key, value) VALUES ('secret_key', ?)",
@@ -297,6 +324,12 @@ def migrate_tasks_into_descriptions(conn):
 
 def table_columns(conn, table):
     return [row["name"] for row in conn.execute(f"PRAGMA table_info({table})")]
+
+
+def add_entry_source_column(conn):
+    columns = table_columns(conn, "entries")
+    if columns and "source_id" not in columns:
+        conn.execute("ALTER TABLE entries ADD COLUMN source_id TEXT")
 
 
 def add_customer_rate_column(conn):
@@ -399,8 +432,9 @@ def export_user_database(source_path, user_id, destination):
         )
         conn.execute(
             """
-            INSERT INTO export.entries (id, user_id, project_id, description, billable, state)
-            SELECT id, user_id, project_id, description, billable, state FROM entries WHERE user_id = ?
+            INSERT INTO export.entries (id, user_id, project_id, description, billable, state, source_id)
+            SELECT id, user_id, project_id, description, billable, state, source_id
+            FROM entries WHERE user_id = ?
             """,
             (user_id,),
         )
@@ -459,6 +493,167 @@ def add_user(conn, email):
 
 
 # --- Sign in with GitHub ---
+
+
+class ClockifyError(Exception):
+    pass
+
+
+def clockify_request(base_url, path, api_key, params=None):
+    """One GET to Clockify's API, returning the decoded JSON."""
+    url = f"{base_url}{path}"
+    if params:
+        url += "?" + urllib.parse.urlencode(params)
+    request = urllib.request.Request(
+        url, headers={"X-Api-Key": api_key, "Accept": "application/json", "User-Agent": "Timelog"}
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return json.load(response)
+    except urllib.error.HTTPError as err:
+        if err.code in (401, 403):
+            raise ClockifyError(
+                "Clockify did not accept the API key. Check the key, and the region if your workspace has one."
+            ) from None
+        if err.code == 429:
+            raise ClockifyError("Clockify's request limit was reached. Try again in an hour.") from None
+        raise ClockifyError(f"Clockify answered with an error ({err.code}).") from None
+    except (OSError, ValueError):
+        raise ClockifyError("Could not reach Clockify. Try again in a moment.") from None
+
+
+def fetch_clockify(api_key, region):
+    """The workspace name and every time entry of the key's user in their active workspace."""
+    base = CLOCKIFY_REGIONS[region]
+    user = clockify_request(base, "/user", api_key)
+    workspace_id = user.get("activeWorkspace") or user.get("defaultWorkspace")
+    if not workspace_id:
+        raise ClockifyError("The Clockify account has no workspace.")
+    workspaces = clockify_request(base, "/workspaces", api_key)
+    name = next((w.get("name") for w in workspaces if w.get("id") == workspace_id), "")
+    clients = {}
+    for archived in ("false", "true"):
+        for client in clockify_request(
+            base, f"/workspaces/{workspace_id}/clients", api_key,
+            {"archived": archived, "page-size": CLOCKIFY_PAGE_SIZE},
+        ):
+            clients[client.get("id")] = client.get("name") or ""
+    entries = []
+    for page in range(1, CLOCKIFY_MAX_PAGES + 1):
+        batch = clockify_request(
+            base, f"/workspaces/{workspace_id}/user/{user['id']}/time-entries", api_key,
+            {"hydrated": "true", "page": page, "page-size": CLOCKIFY_PAGE_SIZE},
+        )
+        entries.extend(batch)
+        if len(batch) < CLOCKIFY_PAGE_SIZE:
+            break
+    return name, clients, entries
+
+
+def parse_clockify_time(value):
+    if not value:
+        return None
+    try:
+        return int(datetime.fromisoformat(value).timestamp())
+    except (TypeError, ValueError):
+        return None
+
+
+def clockify_rows(entries, clients):
+    """Clockify time entries as Timelog rows; returns (rows, running, invalid)."""
+    rows, running, invalid = [], 0, 0
+    for item in entries:
+        interval = item.get("timeInterval") or {}
+        start = parse_clockify_time(interval.get("start"))
+        end = parse_clockify_time(interval.get("end"))
+        if start is not None and interval.get("end") is None:
+            running += 1
+            continue
+        if start is None or end is None or end <= start or start < MIN_TS or end > MAX_TS:
+            invalid += 1
+            continue
+        project = item.get("project") or {}
+        customer = (
+            project.get("clientName") or clients.get(project.get("clientId")) or NO_CLIENT
+        ) if project else NO_CLIENT
+        task = (item.get("task") or {}).get("name") or ""
+        text = (item.get("description") or "").strip()
+        description = f"{task}: {text}" if task and text else task or text
+        rows.append(
+            {
+                "source_id": f"clockify:{item['id']}",
+                "customer": customer.strip()[:200] or NO_CLIENT,
+                "project": (project.get("name") or NO_PROJECT).strip()[:200] or NO_PROJECT,
+                "description": description[:2000],
+                "billable": bool(item.get("billable")),
+                "start": start,
+                "end": end,
+            }
+        )
+    return rows, running, invalid
+
+
+def import_clockify_rows(conn, user_id, rows, dry_run):
+    """Adds rows not imported before, creating customers and projects by name as needed."""
+    imported = {
+        row["source_id"]
+        for row in conn.execute(
+            "SELECT source_id FROM entries WHERE user_id = ? AND source_id IS NOT NULL", (user_id,)
+        )
+    }
+    customers = {
+        row["name"].casefold(): row["id"]
+        for row in conn.execute("SELECT id, name FROM customers WHERE user_id = ?", (user_id,))
+    }
+    projects = {
+        (row["customer_id"], row["name"].casefold()): row["id"]
+        for row in conn.execute(
+            """
+            SELECT p.id, p.customer_id, p.name FROM projects p
+            JOIN customers c ON c.id = p.customer_id WHERE c.user_id = ?
+            """,
+            (user_id,),
+        )
+    }
+    new_customers, new_projects, added, skipped = [], [], 0, 0
+    seen = set()
+    for row in rows:
+        if row["source_id"] in imported or row["source_id"] in seen:
+            skipped += 1
+            continue
+        seen.add(row["source_id"])
+        customer_key = row["customer"].casefold()
+        if customer_key not in customers:
+            new_customers.append(row["customer"])
+            customers[customer_key] = None if dry_run else conn.execute(
+                "INSERT INTO customers (user_id, name) VALUES (?, ?)", (user_id, row["customer"])
+            ).lastrowid
+        customer_id = customers[customer_key]
+        project_key = (customer_id if customer_id is not None else customer_key, row["project"].casefold())
+        if project_key not in projects:
+            new_projects.append(f"{row['customer']} / {row['project']}")
+            projects[project_key] = None if dry_run else conn.execute(
+                "INSERT INTO projects (customer_id, name) VALUES (?, ?)", (customer_id, row["project"])
+            ).lastrowid
+        if not dry_run:
+            entry_id = conn.execute(
+                """
+                INSERT INTO entries (user_id, project_id, description, billable, source_id)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (user_id, projects[project_key], row["description"], int(row["billable"]), row["source_id"]),
+            ).lastrowid
+            conn.execute(
+                "INSERT INTO segments (entry_id, start_ts, end_ts) VALUES (?, ?, ?)",
+                (entry_id, row["start"], row["end"]),
+            )
+        added += 1
+    return {
+        "entries": added,
+        "already_imported": skipped,
+        "new_customers": sorted(new_customers, key=str.casefold),
+        "new_projects": sorted(new_projects, key=str.casefold),
+    }
 
 
 def github_request(url, token=None, data=None):
@@ -902,6 +1097,29 @@ def create_app(db_path=None):
                 "amount": round(total["amount"], 2),
             },
             "groups": finish_children(total),
+        }
+
+    @app.post("/api/import/clockify", tags=["preferences"])
+    def import_clockify(body: ClockifyImport, uid: UserId):
+        """Imports the signed-in user's Clockify time entries; with dry_run, only counts them."""
+        try:
+            workspace, clients, entries = fetch_clockify(body.api_key, body.region)
+        except ClockifyError as err:
+            raise ApiError(str(err), 502) from None
+        rows, running, invalid = clockify_rows(entries, clients)
+        # A dry run writes nothing, so it only needs to read.
+        with (reading() if body.dry_run else writing()) as conn:
+            result = import_clockify_rows(conn, uid, rows, body.dry_run)
+        starts = [row["start"] for row in rows]
+        return {
+            "workspace": workspace,
+            "found": len(entries),
+            "running": running,
+            "invalid": invalid,
+            "first": min(starts) if starts else None,
+            "last": max(starts) if starts else None,
+            "dry_run": body.dry_run,
+            **result,
         }
 
     @app.get("/api/export.sqlite", tags=["preferences"])

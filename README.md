@@ -65,6 +65,18 @@ To run Timelog with it:
 
 The download is a snapshot: later changes on the old server are not included.
 
+## Import from Clockify
+
+Under **Settings → Import from Clockify**, a user can copy all their Clockify time entries into Timelog. It uses Clockify's API, so the free plan's one-month limit on report exports does not apply.
+
+1. In Clockify, create an API key: Preferences → Advanced → Manage API keys → Generate new.
+2. Paste it in Timelog, choose your workspace's region if it has one, and click **Preview**. Nothing is saved yet; the preview shows how many entries, customers and projects would be added.
+3. Click **Import**. The key is used for this request only and is never stored; you can delete it in Clockify afterwards.
+
+It imports the entries of the key's user in their active Clockify workspace. Client → customer, project → project, and the task and description become the description ("Task: description"); entries without a client or project go under "(no client)" and "(no project)". Existing customers and projects with the same names are reused. A running Clockify timer and entries without valid times are skipped. Each imported entry remembers its Clockify id, so importing again only adds new entries. Hourly rates are not imported; set them under Manage.
+
+Clockify's free plan allows 30 API requests an hour; one import uses about five.
+
 ## Run locally
 
 ```sh

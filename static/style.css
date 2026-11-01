@@ -163,6 +163,7 @@ button.small { padding: 3px 9px; font-size: 13px; }
 .settings-card .hint { font-size: 13px; color: var(--muted); margin: 0; }
 .settings-card.about { margin-top: 16px; }
 .settings-card.about p { margin: 0; }
+.import-result p { margin: 0 0 6px; }
 .settings-card .two { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
 .tag { font-size: 12px; color: var(--muted); border: 1px solid var(--border); border-radius: 4px; padding: 0 5px; margin-left: 6px; white-space: nowrap; }
 .duration { font-weight: 600; font-variant-numeric: tabular-nums; }
