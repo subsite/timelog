@@ -1423,6 +1423,18 @@ async function showSettings() {
       h(
         "fieldset",
         {},
+        h("legend", {}, "Your data"),
+        h(
+          "p",
+          {},
+          "Download everything you have in Timelog as a SQLite database, to run Timelog on your own server with the same data. It holds only your own data. ",
+          h("a", { href: `${REPO_URL}#move-your-data-to-your-own-server`, target: "_blank", rel: "noopener noreferrer" }, "How to use it")
+        ),
+        h("p", {}, h("a", { class: "button", href: "/api/export.sqlite", download: "" }, "Download my data (SQLite)"))
+      ),
+      h(
+        "fieldset",
+        {},
         h("legend", {}, "About"),
         h(
           "p",

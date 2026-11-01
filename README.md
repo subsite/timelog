@@ -46,6 +46,25 @@ docker compose cp timelog:/data/backup.db ./timelog-$(date +%F).db
 
 This is safe while the app is running. To restore, stop the app and replace `timelog.db` in the `timelog-data` volume, deleting any `timelog.db-wal` and `timelog.db-shm` files beside it.
 
+## Move your data to your own server
+
+Any user can download their own data under **Settings → Your data → Download my data (SQLite)**. The file is a complete Timelog database holding only that user: their customers, projects, entries (a running timer keeps running) and settings, and nothing from other users. It has its own new session secret.
+
+To run Timelog with it:
+
+1. Set up Timelog on your server as described under [Deploy on a VPS](#deploy-on-a-vps), with your own GitHub OAuth app in `.env`.
+2. Before the first start, copy the downloaded file into place as the database. With Docker, copy it from inside a one-off container so it belongs to the app's user:
+
+   ```sh
+   docker compose run --rm -v "$PWD/timelog-2026-11-01.db:/import.db:ro" timelog cp /import.db /data/timelog.db
+   docker compose up -d
+   ```
+
+   If the app has already run, stop it first and delete any `timelog.db-wal` and `timelog.db-shm` files in the volume. Without Docker, point `TIMELOG_DB` at the file.
+3. Sign in with the same GitHub account as before; your user is already in the file, so `add-user` is not needed. To use a different GitHub account, run `python app.py unlink-github <email>` first.
+
+The download is a snapshot: later changes on the old server are not included.
+
 ## Run locally
 
 ```sh

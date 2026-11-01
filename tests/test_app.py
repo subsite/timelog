@@ -304,6 +304,48 @@ def test_users_have_their_own_names_and_timers(client, other, clock):
     assert other.get("/api/timer").json()["active"]["project_id"] == theirs
 
 
+
+def test_export_holds_only_the_users_data(client, other, clock, tmp_path, monkeypatch, github):
+    mine = add_project(client, "Acme", "Website")
+    t = clock.value
+    add_entry(client, mine, (t - 7200, t - 3600), description="Mine")
+    client.post("/api/timer/start", json={"project_id": mine, "description": "Running"})
+    client.put("/api/preferences", json={"currency": "SEK", "round_minutes": 15})
+    theirs = add_project(other, "Globex", "Secret project")
+    add_entry(other, theirs, (t - 600, t - 300), description="Theirs")
+
+    response = client.get("/api/export.sqlite")
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/vnd.sqlite3"
+    assert response.headers["content-disposition"].startswith('attachment; filename="timelog-')
+    exported = tmp_path / "exported.db"
+    exported.write_bytes(response.content)
+
+    conn = sqlite3.connect(exported)
+    assert [r[0] for r in conn.execute("SELECT email FROM users")] == ["me@example.com"]
+    assert [r[0] for r in conn.execute("SELECT name FROM customers")] == ["Acme"]
+    assert [r[0] for r in conn.execute("SELECT name FROM projects")] == ["Website"]
+    assert sorted(r[0] for r in conn.execute("SELECT description FROM entries")) == ["Mine", "Running"]
+    assert conn.execute("SELECT COUNT(*) FROM segments").fetchone()[0] == 2
+    assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
+    secret = conn.execute("SELECT value FROM settings WHERE key = 'secret_key'").fetchone()[0]
+    conn.close()
+    server = timelog.connect(str(tmp_path / "test.db"))
+    assert secret != timelog.get_setting(server, "secret_key")
+    server.close()
+    assert b"Theirs" not in response.content and b"other@example.com" not in response.content
+
+    # The file runs as another server's database, and the same GitHub account signs in.
+    elsewhere = make_client(exported, monkeypatch, users=())
+    assert sign_in(elsewhere).headers["location"] == "/"
+    assert elsewhere.get("/api/timer").json()["active"]["description"] == "Running"
+    assert elsewhere.get("/api/preferences").json()["currency"] == "SEK"
+    assert [e["description"] for e in elsewhere.get("/api/entries").json()["entries"]] == ["Mine"]
+
+
+def test_export_requires_login(anon):
+    assert anon.get("/api/export.sqlite").status_code == 401
+
 # --- Hierarchy ---
 
 

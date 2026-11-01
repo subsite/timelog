@@ -8,6 +8,7 @@ import re
 import secrets
 import sqlite3
 import sys
+import tempfile
 import time
 import urllib.parse
 import urllib.request
@@ -363,6 +364,66 @@ def read_preferences(conn, user_id):
         return Preferences.model_validate(json.loads(row["preferences"]))
     except (TypeError, ValueError):
         return Preferences()
+
+
+def export_user_database(source_path, user_id, destination):
+    """Writes a new database at destination holding only this user's data, ready to run as
+    another server's TIMELOG_DB. It gets its own session secret, never this server's."""
+    init_db(destination).close()
+    conn = connect(source_path)
+    try:
+        conn.execute("ATTACH DATABASE ? AS export", (str(destination),))
+        # One transaction, so the copy is consistent even while the user keeps working.
+        conn.execute("BEGIN")
+        conn.execute(
+            """
+            INSERT INTO export.users (id, email, github_id, preferences)
+            SELECT id, email, github_id, preferences FROM users WHERE id = ?
+            """,
+            (user_id,),
+        )
+        conn.execute(
+            """
+            INSERT INTO export.customers (id, user_id, name, archived, hourly_rate)
+            SELECT id, user_id, name, archived, hourly_rate FROM customers WHERE user_id = ?
+            """,
+            (user_id,),
+        )
+        conn.execute(
+            """
+            INSERT INTO export.projects (id, customer_id, name, archived)
+            SELECT p.id, p.customer_id, p.name, p.archived
+            FROM projects p JOIN customers c ON c.id = p.customer_id WHERE c.user_id = ?
+            """,
+            (user_id,),
+        )
+        conn.execute(
+            """
+            INSERT INTO export.entries (id, user_id, project_id, description, billable, state)
+            SELECT id, user_id, project_id, description, billable, state FROM entries WHERE user_id = ?
+            """,
+            (user_id,),
+        )
+        conn.execute(
+            """
+            INSERT INTO export.segments (id, entry_id, start_ts, end_ts)
+            SELECT s.id, s.entry_id, s.start_ts, s.end_ts
+            FROM segments s JOIN entries e ON e.id = s.entry_id WHERE e.user_id = ?
+            """,
+            (user_id,),
+        )
+        conn.execute("COMMIT")
+        conn.execute("DETACH DATABASE export")
+    except BaseException:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.close()
+    # A single self-contained file, without a -wal file beside it.
+    out = connect(destination)
+    out.execute("PRAGMA journal_mode = DELETE")
+    out.close()
 
 
 def db_path_from_env():
@@ -842,6 +903,20 @@ def create_app(db_path=None):
             },
             "groups": finish_children(total),
         }
+
+    @app.get("/api/export.sqlite", tags=["preferences"])
+    def export_database(uid: UserId):
+        """The signed-in user's data as a SQLite database for running Timelog on another server."""
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "export.db"
+            export_user_database(db_path, uid, path)
+            content = path.read_bytes()
+        filename = f"timelog-{date.today().isoformat()}.db"
+        return Response(
+            content,
+            media_type="application/vnd.sqlite3",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
 
     @app.get("/api/report.csv", tags=["reports"])
     def report_csv(query: Annotated[CsvQuery, Query()], uid: UserId):
