@@ -1,0 +1,60 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## What this is
+
+Timelog: a single-user time tracker (Customer → Project; each entry's free-text description is what was worked on, like Clockify — there is no Task level) with start/pause/resume/stop timers, continuing earlier entries, manual entries, and reports with grouping, filters and CSV export. Python (FastAPI) + SQLite + plain JavaScript with no build step. The whole backend is `app.py`; the whole frontend is `static/app.js` (a hash-routed SPA served from `static/index.html`). `templates/login.html` is the only server-rendered page.
+
+## Commands
+
+```sh
+# Setup
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt pytest httpx2
+
+# Run locally (login cookies are HTTPS-only unless TIMELOG_INSECURE_COOKIES=1)
+export TIMELOG_INSECURE_COOKIES=1
+.venv/bin/python app.py set-password
+.venv/bin/uvicorn app:create_app --factory --host 0.0.0.0 --port 8000 --no-proxy-headers
+
+# Tests
+.venv/bin/pytest
+.venv/bin/pytest tests/test_app.py::test_start_pause_resume_stop
+
+# CLI
+python app.py set-password            # changing it logs out every session
+python app.py backup <destination>    # online SQLite backup, safe while running
+
+# Deploy (Docker; listens on 127.0.0.1:8000 behind an HTTPS reverse proxy)
+docker compose up -d --build
+docker compose exec timelog python app.py set-password
+```
+
+No linter or formatter is configured.
+
+Environment: `TIMELOG_DB` (default `data/timelog.db`), `TIMELOG_BEHIND_PROXY=1` (trust the last `X-Forwarded-For` value for the login rate limit; set in `compose.yml`), `TIMELOG_INSECURE_COOKIES=1` (local HTTP only).
+
+## Architecture
+
+**App factory.** `create_app(db_path)` initializes the DB and defines all routes as closures over `db_path`, the session secret, and the in-memory login rate-limit state. Pure helpers (segment validation, report tree building, CSV) are module-level functions below it. The app must run with a single worker because the rate limit lives in memory.
+
+**Database access.** No ORM; raw `sqlite3` with a fresh connection per request. Use the `reading()` context manager for reads and `writing()` for writes — `writing()` runs `BEGIN IMMEDIATE` and rolls back on any exception, so raising `ApiError` mid-handler undoes partial writes. The schema is the `SCHEMA` string (`CREATE ... IF NOT EXISTS`, applied on every start). There is no migration framework: one-off migrations in `init_db()` detect the old shape and fix it (`migrate_tasks_into_descriptions` folds the old `tasks` table into entry descriptions; `add_customer_rate_column` adds `customers.hourly_rate`). The `settings` table holds the session secret and password hash, plus user preferences as JSON under the `preferences` key — only that key is exposed, through `GET/PUT /api/preferences` (`Preferences` model: theme, date format, billing rounding, default hourly rate).
+
+**Data model.** An entry has a state (`running`/`paused`/`stopped`) and one or more **segments** (`start_ts`, `end_ts` as Unix seconds); duration is the sum of its segments. Pausing closes the open segment, resuming opens a new one. Invariants:
+- A partial unique index allows only one non-stopped entry at a time; starting a timer stops the current one.
+- `clean_segments()` enforces per-state rules: running entries have exactly one open segment (the latest), others have none; no overlaps within an entry; active entries cannot have future times. Overlaps between entries are allowed.
+- Segments shorter than one second are dropped, and an entry left with no segments is deleted (`close_open_segment`, `stop_entry`).
+- Deleting a customer cascades to its projects, but `entries.project_id` is `ON DELETE RESTRICT`, so items with logged time must be archived instead. `sqlite3.IntegrityError` is turned into a 409 by a global handler.
+
+**Errors.** Raise `ApiError(message, status)` for user-facing errors; responses are always `{"error": "..."}`. Pydantic validation errors are flattened to the same shape with status 400. Request bodies use `strict=True` models.
+
+**Auth/security.** An HTTP middleware (`protect`) gates everything except `/login` and `/static/`: `/api/*` gets 401 JSON, pages redirect to `/login`. The session stores a fingerprint of the password hash, so changing the password invalidates all sessions. The middleware also sets a strict CSP (relaxed only for `/docs`, which loads Swagger UI from jsDelivr) — the app itself must not load third-party resources or use inline scripts.
+
+**Reports.** `report_rows()` selects segments joined up to customer, filtered by date range in the client's time zone (`tz` query param). Each segment counts entirely on the day it starts. `add_to_tree()` builds nested groups for up to three levels from `GROUPS`; `group_key()` prefixes project labels with the customer unless the customer level is already grouped, so same-named projects are not merged. Running segments count up to `now_ts()`. Billable time is rounded up per billed unit by `billable_amounts()` (unit = entry, or day + project + description in the report's time zone); the rounding is added to the unit's first row so every grouping sums to the same rounded total. Amounts are billable seconds × the customer's `hourly_rate`, or the default rate when that is NULL (`amount_for()`). Tracked seconds are never rounded. CSV export has `detail`/`summary` modes and a `standard`/`excel` dialect (`;` separator, decimal comma, UTF-8 BOM).
+
+**Frontend.** `static/app.js` builds the DOM with a small `h()` helper, calls the JSON API through `api()`, and routes on `#timer`, `#reports`, `#manage`. It corrects for clock skew using the `now` value returned by `/api/timer`. Description inputs share a `<datalist>` filled from `/api/recent` (distinct description + project pairs, newest first); choosing a suggestion fills in its project and billable flag. Preferences are loaded at startup into `S.prefs`; `useLocale()` switches every date/time display and input between ISO text fields (`isoInput`) and the browser's native locale pickers. The theme is mirrored to `localStorage` and applied by `static/theme.js` in `<head>` (also on the login page) to avoid a flash. The currency comes from the browser locale's region (`CURRENCY`). Within a day, the Timer list groups entries with the same description, project and billable flag (`groupSameWork`). Report form state and last-used project are kept in `localStorage`.
+
+## Testing
+
+All tests are in `tests/test_app.py` and use FastAPI's `TestClient` against a temporary SQLite file. Fixtures: `anon` (app with a password set, not logged in), `client` (logged in), `clock` (monkeypatches `timelog.now_ts` with a settable fake — set `clock.value` to move time). Code must call the module-level `now_ts()` rather than `time.time()` for this to work. Helpers `add_project()`, `add_entry()` and `ts()` (Helsinki-time timestamps) build test data.

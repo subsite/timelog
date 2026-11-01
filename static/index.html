@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Timelog</title>
+  <script src="/static/theme.js"></script>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <strong class="brand">Timelog</strong>
+    <nav>
+      <a href="#timer" data-route="timer">Timer</a>
+      <a href="#reports" data-route="reports">Reports</a>
+      <a href="#manage" data-route="manage">Manage</a>
+      <a href="#settings" data-route="settings">Settings</a>
+    </nav>
+    <form method="post" action="/logout"><button class="link" type="submit">Log out</button></form>
+  </header>
+  <main id="view"></main>
+  <script src="/static/app.js"></script>
+</body>
+</html>

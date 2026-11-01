@@ -1,0 +1,14 @@
+services:
+  timelog:
+    build: .
+    restart: unless-stopped
+    environment:
+      TIMELOG_BEHIND_PROXY: "1"
+    ports:
+      # Local only: put an HTTPS reverse proxy in front.
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - timelog-data:/data
+
+volumes:
+  timelog-data:
