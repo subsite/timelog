@@ -1416,9 +1416,34 @@ async function showSettings() {
         )
       ),
       status
+    ),
+    h(
+      "section",
+      { class: "card settings-card about" },
+      h(
+        "fieldset",
+        {},
+        h("legend", {}, "About"),
+        h(
+          "p",
+          {},
+          "Timelog is made by ",
+          h("a", { href: "https://subsite.fi", target: "_blank", rel: "noopener noreferrer" }, "SubSite"),
+          "."
+        ),
+        h("p", {}, "Timelog is free software: you can share and change it under the GNU General Public License, version 3 or later."),
+        h(
+          "p",
+          {},
+          "Source code, issues and the license: ",
+          h("a", { href: REPO_URL, target: "_blank", rel: "noopener noreferrer" }, REPO_URL.replace("https://", ""))
+        )
+      )
     )
   );
 }
+
+const REPO_URL = "https://github.com/subsite/timelog";
 
 // --- Routing and clock ---
 

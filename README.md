@@ -87,3 +87,9 @@ Billing rounding rounds billable time up to the next started step (for example 3
 - Starting a new timer stops the current one.
 - Overlaps are rejected within an entry, but not between entries.
 - Grouping a report by description adds up all entries with the same text, so continuing earlier work keeps its time together.
+
+## License
+
+Made by [SubSite](https://subsite.fi). Copyright © 2026 Fredrik Welander.
+
+Timelog is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version. It is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See [LICENSE](LICENSE) for the full text.
