@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" role="img" aria-label="Timelog">
+  <rect x="42" y="2" width="16" height="9" rx="3" fill="#1d1f21"/>
+  <rect x="46" y="8" width="8" height="12" fill="#1d1f21"/>
+  <circle cx="50" cy="57" r="35" fill="none" stroke="#1d1f21" stroke-width="9"/>
+  <path d="M50 57 V36 M50 57 H67" fill="none" stroke="#1f6f5c" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

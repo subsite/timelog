@@ -1,4 +1,4 @@
-# Timelog
+# <img src="static/logo.svg" alt="" width="40" align="top"> Timelog
 
 A time tracker for a few people, each with their own separate data: Customer → Project, with each entry described in free text. Start/pause/stop, continue earlier work, manual entries, editing, and reports with grouping, filters and CSV export.
 
@@ -118,6 +118,7 @@ Billing rounding rounds billable time up to the next started step (for example 3
 - Starting a new timer stops the current one.
 - Overlaps are rejected within an entry, but not between entries.
 - Grouping a report by description adds up all entries with the same text, so continuing earlier work keeps its time together.
+- Customers and projects with logged time can't be deleted, only archived. Reports leave out archived customers and projects unless **Show archived** is ticked.
 
 ## License
 

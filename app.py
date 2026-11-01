@@ -253,6 +253,8 @@ class ReportQuery(BaseModel):
     customer_id: int | None = None
     project_id: int | None = None
     billable: Literal["", "0", "1"] = ""
+    # False leaves out time on archived customers and projects.
+    include_archived: bool = True
     q: str = ""
     group: str = ""
 
@@ -884,16 +886,23 @@ def create_app(db_path=None):
     def tree(uid: UserId):
         with reading() as conn:
             return {
+                # has_time: logged time blocks deleting, so the page offers archiving instead.
                 "customers": rows(
                     conn.execute(
-                        "SELECT id, name, archived, hourly_rate FROM customers WHERE user_id = ? ORDER BY name",
+                        """
+                        SELECT c.id, c.name, c.archived, c.hourly_rate,
+                               EXISTS (SELECT 1 FROM projects p JOIN entries e ON e.project_id = p.id
+                                       WHERE p.customer_id = c.id) AS has_time
+                        FROM customers c WHERE c.user_id = ? ORDER BY c.name
+                        """,
                         (uid,),
                     )
                 ),
                 "projects": rows(
                     conn.execute(
                         """
-                        SELECT p.* FROM projects p JOIN customers c ON c.id = p.customer_id
+                        SELECT p.*, EXISTS (SELECT 1 FROM entries e WHERE e.project_id = p.id) AS has_time
+                        FROM projects p JOIN customers c ON c.id = p.customer_id
                         WHERE c.user_id = ? ORDER BY p.name
                         """,
                         (uid,),
@@ -1327,6 +1336,8 @@ def report_rows(conn, user_id, query, tz):
     if query.billable:
         where.append("e.billable = ?")
         params.append(int(query.billable))
+    if not query.include_archived:
+        where.append("c.archived = 0 AND p.archived = 0")
     search = query.q.strip()
     if search:
         escaped = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")

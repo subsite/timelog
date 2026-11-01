@@ -359,7 +359,8 @@ function editCustomer(customer) {
   });
 }
 
-function confirmAction(message, label = "Delete") {
+// Resolves true when the action is chosen. Without a label it only informs, with a Close button.
+function confirmAction(message, label = "Delete", danger = true) {
   return new Promise((resolve) => {
     const dlg = h(
       "dialog",
@@ -371,8 +372,8 @@ function confirmAction(message, label = "Delete") {
         h(
           "div",
           { class: "dialog-buttons" },
-          h("button", { class: "danger", type: "button", onclick: () => finish(true) }, label),
-          h("button", { type: "button", onclick: () => finish(false) }, "Cancel")
+          label ? h("button", { class: danger ? "danger" : "primary", type: "button", onclick: () => finish(true) }, label) : null,
+          h("button", { type: "button", onclick: () => finish(false) }, label ? "Cancel" : "Close")
         )
       )
     );
@@ -968,7 +969,7 @@ function presetRange(preset) {
 function loadReportForm() {
   const defaults = {
     preset: "this-month", from: "", to: "", customer: "", project: "",
-    billable: "", q: "", group1: "customer", group2: "project", group3: "description", group4: "", dialect: "standard",
+    billable: "", archived: false, q: "", group1: "customer", group2: "project", group3: "description", group4: "", dialect: "standard",
   };
   try {
     return { ...defaults, ...JSON.parse(localStorage.getItem(REPORT_KEY) || "{}") };
@@ -987,6 +988,7 @@ function reportParams(form) {
   if (form.customer) params.set("customer_id", form.customer);
   if (form.project) params.set("project_id", form.project);
   if (form.billable) params.set("billable", form.billable);
+  if (!form.archived) params.set("include_archived", "false");
   if (form.q.trim()) params.set("q", form.q.trim());
   const groups = [form.group1, form.group2, form.group3, form.group4].filter(Boolean);
   params.set("group", [...new Set(groups)].join(","));
@@ -1025,7 +1027,20 @@ async function showReports() {
   const controls = h("div", {});
 
   function renderControls() {
-    const projects = S.tree.projects.filter((p) => !form.customer || p.customer_id === Number(form.customer));
+    // Archived customers and projects are only offered with "Show archived".
+    const archivedCustomers = new Set(S.tree.customers.filter((c) => c.archived).map((c) => c.id));
+    const customers = S.tree.customers.filter((c) => form.archived || !c.archived);
+    const projects = S.tree.projects.filter(
+      (p) =>
+        (!form.customer || p.customer_id === Number(form.customer)) &&
+        (form.archived || (!p.archived && !archivedCustomers.has(p.customer_id)))
+    );
+    const showArchived = h("input", { type: "checkbox", checked: form.archived });
+    showArchived.addEventListener("change", () => {
+      form.archived = showArchived.checked;
+      renderControls();
+      changed();
+    });
     const customSelected = form.preset === "custom";
 
     const dateInput = (key) => {
@@ -1066,12 +1081,13 @@ async function showReports() {
       h(
         "div",
         { class: "filters" },
-        select("customer", "Customer", [option("", "All"), S.tree.customers.map((c) => option(String(c.id), c.name + archivedSuffix(c)))], () => {
+        select("customer", "Customer", [option("", "All"), customers.map((c) => option(String(c.id), c.name + archivedSuffix(c)))], () => {
           form.project = "";
           renderControls();
         }),
         select("project", "Project", [option("", "All"), projects.map((p) => option(String(p.id), p.name + archivedSuffix(p)))]),
-        h("label", {}, "Description", search)
+        h("label", {}, "Description", search),
+        h("label", { class: "check" }, showArchived, "Show archived")
       ),
       h(
         "div",
@@ -1231,7 +1247,25 @@ async function showManage() {
       await rerender();
     });
     const remove = guard(async () => {
-      if (!(await confirmAction(`Delete "${item.name}" and everything under it?`))) return;
+      const what = kind === "customers" ? "customer" : "project";
+      if (item.has_time) {
+        // Logged time is never deleted, so the only way to retire it is archiving.
+        const reason = `The ${what} "${item.name}" has logged time, so it can't be deleted.`;
+        if (item.archived) {
+          await confirmAction(`${reason} It is already archived, which keeps it out of the way; its history is in reports under "Show archived".`, null);
+          return;
+        }
+        if (await confirmAction(`${reason} Archive it instead? It disappears from new timers and entries, and its history stays in reports under "Show archived".`, "Archive", false)) {
+          await toggleArchive();
+        }
+        return;
+      }
+      const projects = kind === "customers" ? S.tree.projects.filter((p) => p.customer_id === item.id).length : 0;
+      const question =
+        kind === "customers"
+          ? `Delete the customer "${item.name}"${projects ? ` and its ${projects === 1 ? "project" : `${projects} projects`}` : ""}?`
+          : `Delete the project "${item.name}"?`;
+      if (!(await confirmAction(question))) return;
       await api(`/api/${kind}/${item.id}`, "DELETE");
       await rerender();
     });

@@ -5,11 +5,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Log in · Timelog</title>
   <script src="/static/theme.js"></script>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body class="login-page">
   <main class="login-card">
-    <h1>Timelog</h1>
+    <h1 class="brand"><svg class="brand-mark" viewBox="0 0 100 100" aria-hidden="true"><rect x="42" y="2" width="16" height="9" rx="3" fill="currentColor"/><rect x="46" y="8" width="8" height="12" fill="currentColor"/><circle cx="50" cy="57" r="35" fill="none" stroke="currentColor" stroke-width="9"/><path class="hands" d="M50 57 V36 M50 57 H67" fill="none" stroke="#1f6f5c" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/></svg>Timelog</h1>
     {% if not configured %}
       <p>Sign-in is not set up yet. Set <code>TIMELOG_GITHUB_CLIENT_ID</code> and <code>TIMELOG_GITHUB_CLIENT_SECRET</code> on the server.</p>
     {% else %}

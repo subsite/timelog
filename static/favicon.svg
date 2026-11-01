@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <style>
+    .ink { fill: #1d1f21; } .ring { stroke: #1d1f21; } .hands { stroke: #1f6f5c; }
+    @media (prefers-color-scheme: dark) {
+      .ink { fill: #e8e8e6; } .ring { stroke: #e8e8e6; } .hands { stroke: #4fb89e; }
+    }
+  </style>
+  <rect class="ink" x="42" y="2" width="16" height="9" rx="3"/>
+  <rect class="ink" x="46" y="8" width="8" height="12"/>
+  <circle class="ring" cx="50" cy="57" r="35" fill="none" stroke-width="9"/>
+  <path class="hands" d="M50 57 V36 M50 57 H67" fill="none" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

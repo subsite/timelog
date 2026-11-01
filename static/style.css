@@ -232,6 +232,7 @@ td.group-label.level-2 { padding-left: 58px; }
 .tree-row.kind-customers .name { font-weight: 600; }
 .tree-row.archived .name { color: var(--muted); text-decoration: line-through; }
 .archived-toggle { margin-bottom: 12px; }
+.filters label.check { align-self: end; padding-bottom: 8px; }
 
 /* Login */
 .login-page { display: grid; place-items: center; min-height: 100vh; padding: 16px; }
@@ -241,9 +242,14 @@ td.group-label.level-2 { padding-left: 58px; }
 .login-card a.button { display: block; text-align: center; text-decoration: none; margin-top: 8px; }
 #whoami { font-size: 13px; }
 
+/* The stopwatch logo: lines in the text color, hands in the accent color. */
+.brand { display: inline-flex; align-items: center; gap: 8px; }
+.brand-mark { width: 1.35em; height: 1.35em; flex: none; }
+.brand-mark .hands { stroke: var(--accent); }
+
 @media (max-width: 680px) {
   .topbar { gap: 10px; padding: 8px 12px; }
-  .topbar .brand { display: none; }
+  .topbar .brand-name { display: none; }
   main#view { padding: 12px; }
   .picker, .filters { grid-template-columns: minmax(0, 1fr); }
   .filters.compact { grid-template-columns: repeat(2, minmax(0, 1fr)); }

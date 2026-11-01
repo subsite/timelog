@@ -541,8 +541,15 @@ def test_delete_blocked_while_time_is_logged(client, clock):
         assert client.delete(path).status_code == 409
     tree = client.get("/api/tree").json()
     assert len(tree["customers"]) == 1 and len(tree["projects"]) == 1
+    # The page uses has_time to offer archiving instead of a delete that would fail.
+    empty = add_project(client, "Acme", "Empty")
+    flags = {p["name"]: p["has_time"] for p in client.get("/api/tree").json()["projects"]}
+    assert flags == {"Website": 1, "Empty": 0}
+    assert client.get("/api/tree").json()["customers"][0]["has_time"] == 1
+    assert client.delete(f"/api/projects/{empty}").status_code == 204
 
     assert client.delete(f"/api/entries/{entry['id']}").status_code == 204
+    assert client.get("/api/tree").json()["customers"][0]["has_time"] == 0
     assert client.delete(f"/api/customers/{customer_id}").status_code == 204
     tree = client.get("/api/tree").json()
     assert tree == {"customers": [], "projects": []}
@@ -852,6 +859,23 @@ def test_report_filters(client, report_data):
     assert report(client, q="100%")["total"]["seconds"] == 2 * 3600
     assert report(client, q="%")["total"]["seconds"] == 2 * 3600
 
+
+
+def test_report_can_leave_out_archived_items(client, clock):
+    active = add_project(client, "Acme", "Website")
+    old_project = add_project(client, "Acme", "Old site")
+    old_customer = add_project(client, "Gone", "Work")
+    t = clock.value
+    for project_id in (active, old_project, old_customer):
+        add_entry(client, project_id, (t - 3600, t - 1800))
+    client.patch(f"/api/projects/{old_project}", json={"archived": True})
+    gone = [c for c in client.get("/api/tree").json()["customers"] if c["name"] == "Gone"][0]
+    client.patch(f"/api/customers/{gone['id']}", json={"archived": True})
+
+    assert report(client)["total"]["seconds"] == 3 * 1800
+    current = report(client, include_archived="false", group="project")
+    assert current["total"]["seconds"] == 1800
+    assert [g["label"] for g in current["groups"]] == ["Acme / Website"]
 
 def test_report_date_range_uses_requested_time_zone(client):
     project_id = add_project(client)
