@@ -688,8 +688,11 @@ def github_identity(client_id, client_secret, code, redirect_uri):
     return int(account["id"]), verified
 
 
-def user_for_github(conn, github_id, verified_emails):
-    """The enabled user this GitHub account signs in as, linking it on the first sign-in."""
+def user_for_github(conn, github_id, verified_emails, open_signup=False):
+    """The enabled user this GitHub account signs in as, linking it on the first sign-in.
+
+    With open sign-up, an account that matches no user becomes a new user under its first
+    verified email that no other user has."""
     user = conn.execute("SELECT * FROM users WHERE github_id = ?", (github_id,)).fetchone()
     if user is None:
         for email in verified_emails:
@@ -698,6 +701,12 @@ def user_for_github(conn, github_id, verified_emails):
                 conn.execute("UPDATE users SET github_id = ? WHERE id = ?", (github_id, found["id"]))
                 user = find_user(conn, email)
                 break
+    if user is None and open_signup:
+        free = [email for email in verified_emails if not find_user(conn, email)]
+        if free:
+            uid = add_user(conn, free[0])
+            conn.execute("UPDATE users SET github_id = ? WHERE id = ?", (github_id, uid))
+            user = conn.execute("SELECT * FROM users WHERE id = ?", (uid,)).fetchone()
     if user is None or user["disabled"]:
         return None
     return user
@@ -715,6 +724,7 @@ def create_app(db_path=None):
     github_client_id = os.environ.get("TIMELOG_GITHUB_CLIENT_ID", "")
     github_client_secret = os.environ.get("TIMELOG_GITHUB_CLIENT_SECRET", "")
     base_url = os.environ.get("TIMELOG_BASE_URL", "http://localhost:8000").rstrip("/")
+    open_signup = os.environ.get("TIMELOG_OPEN_SIGNUP") == "1"
     github_callback = f"{base_url}/auth/github/callback"
     templates = Jinja2Templates(directory=BASE_DIR / "templates")
 
@@ -831,7 +841,7 @@ def create_app(db_path=None):
                 "redirect_uri": github_callback,
                 "scope": "user:email",
                 "state": state,
-                "allow_signup": "false",
+                "allow_signup": "true" if open_signup else "false",
             }
         )
         return RedirectResponse(f"{GITHUB_AUTHORIZE_URL}?{query}", status_code=303)
@@ -849,7 +859,7 @@ def create_app(db_path=None):
             print(f"GitHub sign-in failed: {err!r}", file=sys.stderr)
             return RedirectResponse("/login?error=failed", status_code=303)
         with writing() as conn:
-            user = user_for_github(conn, github_id, emails)
+            user = user_for_github(conn, github_id, emails, open_signup)
         if user is None:
             return RedirectResponse("/login?error=noaccess", status_code=303)
         request.session.clear()

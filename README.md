@@ -6,7 +6,7 @@ Python (FastAPI), SQLite and plain JavaScript. All data is in one database file.
 
 ## Signing in
 
-Users sign in with GitHub. Access is by invitation: `python app.py add-user someone@example.com` lets in a GitHub account that has that address **verified**. The first sign-in links the GitHub account to the user, so later email changes on GitHub do not matter. Users share nothing; each has their own customers, projects, entries and settings.
+Users sign in with GitHub. By default access is by invitation: `python app.py add-user someone@example.com` lets in a GitHub account that has that address **verified**. With `TIMELOG_OPEN_SIGNUP=1` in `.env`, anyone with a GitHub account can sign in, and a new user is created under their first verified email address; `disable-user` still keeps someone out. The first sign-in links the GitHub account to the user, so later email changes on GitHub do not matter. Users share nothing; each has their own customers, projects, entries and settings.
 
 Set up a GitHub OAuth app (GitHub → Settings → Developer settings → OAuth Apps) with the callback URL `https://<your-host>/auth/github/callback`, and put its client ID and secret in `.env` (copy `.env.example`).
 

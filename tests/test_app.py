@@ -218,6 +218,34 @@ def test_only_invited_verified_emails_get_in(anon, github):
     assert sign_in(anon).headers["location"] == "/"
 
 
+def test_open_signup_creates_users(tmp_path, monkeypatch, github):
+    monkeypatch.setenv("TIMELOG_OPEN_SIGNUP", "1")
+    client = make_client(tmp_path / "open.db", monkeypatch)
+    query = parse_qs(urlparse(client.get("/auth/github").headers["location"]).query)
+    assert query["allow_signup"] == ["true"]
+    # Unverified addresses and ones another user has are skipped.
+    github.account_id = 2002
+    github.emails = [("unverified@example.com", False), ("me@example.com", True), ("new@example.com", True)]
+    # me@example.com is unlinked, so this account is linked to it rather than made a new user.
+    assert sign_in(client).headers["location"] == "/"
+    assert client.get("/api/me").json() == {"email": "me@example.com"}
+    client.post("/logout")
+    github.account_id = 2003
+    assert sign_in(client).headers["location"] == "/"
+    assert client.get("/api/me").json() == {"email": "new@example.com"}
+    assert not client.get("/api/tree").json()["customers"]
+    client.post("/logout")
+    # No verified address left that is free: no access.
+    github.account_id = 2004
+    github.emails = [("new@example.com", True)]
+    assert sign_in(client).headers["location"] == "/login?error=noaccess"
+    # Disabled users stay out.
+    monkeypatch.setenv("TIMELOG_DB", str(tmp_path / "open.db"))
+    timelog.cli(["disable-user", "new@example.com"])
+    github.account_id = 2003
+    assert sign_in(client).headers["location"] == "/login?error=noaccess"
+
+
 def test_github_account_stays_linked(anon, github, tmp_path):
     assert sign_in(anon).headers["location"] == "/"
     # The email changes on GitHub: the linked account still signs in.
