@@ -1529,7 +1529,8 @@ function apiKeySettings() {
     shown.replaceChildren(
       h("p", { class: "hint" }, "Copy the key now. It is not stored and will not be shown again."),
       h("div", { class: "api-key-row" }, field, copy),
-      h("pre", { class: "api-example" }, `curl -H "Authorization: Bearer ${key}" ${endpoint}`)
+      h("pre", { class: "api-example" }, `curl -H "Authorization: Bearer ${key}" ${endpoint}`),
+      h("pre", { class: "api-example" }, `curl -N -H "Authorization: Bearer ${key}" ${endpoint}/stream`)
     );
     render(true);
   }
@@ -1561,6 +1562,18 @@ function apiKeySettings() {
       " with the header ",
       h("code", {}, "Authorization: Bearer <key>"),
       ". The answer is JSON with the entry's description, project, customer, state and elapsed time."
+    ),
+    h(
+      "p",
+      {},
+      "To follow changes live, use ",
+      h("code", {}, `GET ${endpoint}/stream`),
+      " with the same header. It is a stream of server-sent events: a ",
+      h("code", {}, "timer"),
+      " event with the same JSON at once, and again whenever the timer is started, paused, resumed, stopped or edited. ",
+      "Elapsed time is not re-sent while the timer runs, so count it from ",
+      h("code", {}, "running_since"),
+      ". A comment line every 25 seconds keeps the connection open, and the stream ends if the key is removed."
     ),
     state,
     buttons,
