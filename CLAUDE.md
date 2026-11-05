@@ -29,6 +29,8 @@ python app.py add-user <email>        # invite; also list-users, set-email, disa
 python app.py backup <destination>    # online SQLite backup, safe while running
 
 # Deploy (Docker; listens on 127.0.0.1:8000 behind an HTTPS reverse proxy)
+./deploy.sh                           # production: clean tree + tests + DB backup, then rebuild
+./deploy.sh staging                   # recreate staging (needed only after .env.staging changes)
 docker compose up -d --build          # reads .env (GitHub client ID/secret, TIMELOG_BASE_URL)
 docker compose exec timelog python app.py add-user you@example.com
 ```
