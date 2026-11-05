@@ -1421,17 +1421,13 @@ async function showSettings() {
     })
   );
 
-  refresh();
-  view.replaceChildren(
-    h("h1", {}, "Settings"),
-    h(
-      "section",
-      { class: "card settings-card" },
-      h("fieldset", {}, h("legend", {}, "Appearance"), h("div", { class: "two" }, theme.label, dates.label)),
-      h(
-        "fieldset",
-        {},
-        h("legend", {}, "Billing"),
+  const link = (href, text) => h("a", { href, target: "_blank", rel: "noopener noreferrer" }, text);
+  const sections = [
+    ["appearance", "Appearance", () => [h("div", { class: "two" }, theme.label, dates.label), status]],
+    [
+      "billing",
+      "Billing",
+      () => [
         h("div", { class: "two" }, step.label, unit.label),
         h("div", { class: "two" }, money.label, h("p", { class: "hint align-end" }, "Used when showing rates and amounts.")),
         h(
@@ -1447,50 +1443,120 @@ async function showSettings() {
           "Rounding by day adds up short sessions on the same work before rounding, so 3 × 10 minutes bills as one started 30 minutes. ",
           "Rounding by project adds up all of a project's time in the report's date range and rounds it once. ",
           "Rounding is done within each row of a report, so every row bills whole steps: grouped by month, a project is rounded once per month."
-        )
-      ),
-      status
-    ),
-    h(
-      "section",
-      { class: "card settings-card about" },
-      h(
-        "fieldset",
-        {},
-        h("legend", {}, "Your data"),
+        ),
+        status,
+      ],
+    ],
+    [
+      "data",
+      "Your data",
+      () => [
         h(
           "p",
           {},
           "Download everything you have in Timelog as a SQLite database, to run Timelog on your own server with the same data. It holds only your own data. ",
-          h("a", { href: `${REPO_URL}#move-your-data-to-your-own-server`, target: "_blank", rel: "noopener noreferrer" }, "How to use it")
+          link(`${REPO_URL}#move-your-data-to-your-own-server`, "How to use it")
         ),
-        h("p", {}, h("a", { class: "button", href: "/api/export.sqlite", download: "" }, "Download my data (SQLite)"))
-      ),
-      clockifyImport(),
-      h(
-        "fieldset",
-        {},
-        h("legend", {}, "About"),
-        h(
-          "p",
-          {},
-          "Timelog is made by ",
-          h("a", { href: "https://subsite.fi", target: "_blank", rel: "noopener noreferrer" }, "SubSite"),
-          "."
-        ),
+        h("p", {}, h("a", { class: "button", href: "/api/export.sqlite", download: "" }, "Download my data (SQLite)")),
+      ],
+    ],
+    ["import", "Import from Clockify", () => [clockifyImport()]],
+    ["api", "API", () => [apiKeySettings()]],
+    [
+      "about",
+      "About",
+      () => [
+        h("p", {}, "Timelog is made by ", link("https://subsite.fi", "SubSite"), "."),
         h("p", {}, "Timelog is free software: you can share and change it under the GNU General Public License, version 3 or later."),
-        h(
-          "p",
-          {},
-          "Source code, issues and the license: ",
-          h("a", { href: REPO_URL, target: "_blank", rel: "noopener noreferrer" }, REPO_URL.replace("https://", ""))
+        h("p", {}, "Source code, issues and the license: ", link(REPO_URL, REPO_URL.replace("https://", ""))),
+      ],
+    ],
+  ];
+  const wanted = location.hash.split("/")[1];
+  const [id, title, build] = sections.find(([key]) => key === wanted) || sections[0];
+
+  refresh();
+  view.replaceChildren(
+    h("h1", {}, "Settings"),
+    h(
+      "div",
+      { class: "settings-layout" },
+      h(
+        "nav",
+        { class: "settings-nav", "aria-label": "Settings sections" },
+        sections.map(([key, text]) =>
+          h("a", { href: `#settings/${key}`, class: key === id ? "current" : "", "aria-current": key === id ? "page" : null }, text)
         )
-      )
+      ),
+      h("section", { class: "card settings-card" }, h("h2", {}, title), build())
     )
   );
 }
 
 const REPO_URL = "https://github.com/subsite/timelog";
+
+// Settings → API: make, replace or remove the key that lets scripts read the running timer.
+function apiKeySettings() {
+  const endpoint = `${location.origin}/api/v1/timer`;
+  const state = h("p", {});
+  const shown = h("div", { class: "api-key-shown" });
+  const buttons = h("p", { class: "buttons" });
+
+  async function generate(exists) {
+    if (exists && !(await confirmAction("Make a new API key? The current key stops working at once.", "Make new key"))) return;
+    const { key } = await api("/api/api-key", "POST");
+    const field = h("input", { class: "api-key", readOnly: true, value: key, spellcheck: false, "aria-label": "API key" });
+    const copy = h("button", { type: "button" }, "Copy");
+    copy.addEventListener("click", async () => {
+      field.select();
+      try {
+        await navigator.clipboard.writeText(key);
+        copy.textContent = "Copied";
+      } catch {
+        copy.textContent = "Press Ctrl+C";
+      }
+    });
+    shown.replaceChildren(
+      h("p", { class: "hint" }, "Copy the key now. It is not stored and will not be shown again."),
+      h("div", { class: "api-key-row" }, field, copy),
+      h("pre", { class: "api-example" }, `curl -H "Authorization: Bearer ${key}" ${endpoint}`)
+    );
+    render(true);
+  }
+
+  async function remove() {
+    if (!(await confirmAction("Remove the API key? Scripts using it stop working.", "Remove key"))) return;
+    await api("/api/api-key", "DELETE");
+    shown.replaceChildren();
+    render(false);
+  }
+
+  function render(exists) {
+    state.textContent = exists ? "You have an API key." : "You have no API key.";
+    buttons.replaceChildren(
+      h("button", { type: "button", class: exists ? "" : "primary", onclick: guard(() => generate(exists)) }, exists ? "Make new key" : "Make API key"),
+      ...(exists ? [h("button", { type: "button", class: "danger", onclick: guard(remove) }, "Remove key")] : [])
+    );
+  }
+
+  api("/api/api-key").then((data) => render(data.exists), () => render(false));
+  return h(
+    "div",
+    { class: "settings-group" },
+    h(
+      "p",
+      {},
+      "Scripts and widgets can read your running timer with an API key: ",
+      h("code", {}, `GET ${endpoint}`),
+      " with the header ",
+      h("code", {}, "Authorization: Bearer <key>"),
+      ". The answer is JSON with the entry's description, project, customer, state and elapsed time."
+    ),
+    state,
+    buttons,
+    shown
+  );
+}
 
 // Settings → Import from Clockify: preview what would be imported, then import it.
 function clockifyImport() {
@@ -1561,9 +1627,8 @@ function clockifyImport() {
 
   previewButton.addEventListener("click", guard(preview));
   return h(
-    "fieldset",
-    {},
-    h("legend", {}, "Import from Clockify"),
+    "div",
+    { class: "settings-group" },
     h(
       "p",
       {},
@@ -1587,7 +1652,7 @@ function clockifyImport() {
 const routes = { timer: showTimer, reports: showReports, manage: showManage, settings: showSettings };
 
 const navigate = guard(async () => {
-  const route = location.hash.slice(1);
+  const route = location.hash.slice(1).split("/")[0];
   S.route = routes[route] ? route : "timer";
   for (const link of document.querySelectorAll("[data-route]")) {
     link.classList.toggle("current", link.dataset.route === S.route);

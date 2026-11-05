@@ -1279,3 +1279,83 @@ def test_single_user_database_moves_to_first_user(tmp_path, monkeypatch, github)
     assert client.get("/api/tree").json()["customers"][0]["name"] == "Acme"
     assert client.get("/api/timer").json()["active"]["description"] == "Logo"
     assert client.get("/api/preferences").json()["round_minutes"] == 30
+
+
+def test_api_key_shows_running_timer(client, other, clock):
+    assert client.get("/api/api-key").json() == {"exists": False}
+    key = client.post("/api/api-key").json()["key"]
+    assert key.startswith("tl_") and client.get("/api/api-key").json() == {"exists": True}
+
+    outsider = TestClient(client.app)  # No session cookie: only the key counts.
+
+    def public(token=key, header=None):
+        headers = {"Authorization": header or f"Bearer {token}"}
+        return outsider.get("/api/v1/timer", headers=headers)
+
+    t = clock.value
+    assert public().json() == {"running": False, "entry": None, "now": timelog.iso_utc(t)}
+    project_id = add_project(client, "Acme", "Website")
+    client.post("/api/timer/start", json={"project_id": project_id, "description": "Fix bug"})
+    clock.value = t + 3725
+    entry = public().json()["entry"]
+    assert public().json()["running"] is True
+    assert entry == {
+        "state": "running",
+        "description": "Fix bug",
+        "project": "Website",
+        "customer": "Acme",
+        "billable": True,
+        "started_at": timelog.iso_utc(t),
+        "running_since": timelog.iso_utc(t),
+        "elapsed_seconds": 3725,
+        "elapsed": "1:02:05",
+    }
+    client.post("/api/timer/pause")
+    clock.value = t + 5000
+    paused = public().json()
+    assert paused["running"] is False
+    assert paused["entry"]["state"] == "paused" and paused["entry"]["running_since"] is None
+    assert paused["entry"]["elapsed_seconds"] == 3725
+
+    # Other users' keys see their own timer; wrong or missing keys get 401.
+    other_key = other.post("/api/api-key").json()["key"]
+    assert public(other_key).json()["entry"] is None
+    for header in ("Bearer tl_wrong", "Bearer ", f"Basic {key}", "nothing"):
+        response = public(header=header)
+        assert response.status_code == 401 and response.headers["www-authenticate"] == "Bearer"
+    # The key is stored only as a hash.
+    assert key not in str(client.get("/api/export.sqlite").content)
+
+    # A new key replaces the old one; removing it ends access.
+    new_key = client.post("/api/api-key").json()["key"]
+    assert public().status_code == 401 and public(new_key).status_code == 200
+    client.delete("/api/api-key")
+    assert public(new_key).status_code == 401
+    assert client.get("/api/api-key").json() == {"exists": False}
+
+
+def test_api_key_stops_working_for_disabled_users(client, tmp_path, monkeypatch):
+    key = client.post("/api/api-key").json()["key"]
+    monkeypatch.setenv("TIMELOG_DB", str(tmp_path / "test.db"))
+    timelog.cli(["disable-user", "me@example.com"])
+    anon = TestClient(client.app)
+    assert anon.get("/api/v1/timer", headers={"Authorization": f"Bearer {key}"}).status_code == 401
+
+
+def test_api_key_routes_need_sign_in(anon):
+    assert anon.get("/api/api-key").status_code == 401
+    assert anon.post("/api/api-key").status_code == 401
+
+
+def test_users_table_gets_api_key_column(tmp_path):
+    path = str(tmp_path / "old.db")
+    conn = timelog.init_db(path)
+    conn.execute("DROP INDEX users_api_key")
+    conn.execute("ALTER TABLE users DROP COLUMN api_key_hash")
+    timelog.add_user(conn, "me@example.com")
+    conn.commit()
+    conn.close()
+    conn = timelog.init_db(path)
+    assert "api_key_hash" in timelog.table_columns(conn, "users")
+    assert [tuple(row) for row in conn.execute("SELECT email, api_key_hash FROM users")] == [("me@example.com", None)]
+    conn.close()

@@ -74,7 +74,7 @@ h2 { font-size: 15px; margin: 0; }
 }
 .topbar nav a:hover { background: var(--hover); }
 .topbar nav a.current { color: var(--text); font-weight: 600; background: var(--hover); }
-.topbar form { margin: 0; }
+.topbar form { margin: 0; white-space: nowrap; }
 
 main#view { max-width: 980px; margin: 0 auto; padding: 20px; }
 
@@ -157,12 +157,19 @@ button.small { padding: 3px 9px; font-size: 13px; }
 .entry .count[aria-expanded="true"] { border-color: var(--accent); color: var(--accent); }
 .entry.grouped { padding-left: 54px; background: var(--bg); }
 
-.settings-card { display: flex; flex-direction: column; gap: 18px; max-width: 560px; }
-.settings-card fieldset { border: 0; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 10px; }
+.settings-card { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.settings-card h2 { font-size: 18px; margin: 0; }
+.settings-card p { margin: 0; }
+.settings-card .settings-group { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.settings-card fieldset { border: 0; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
 .settings-card legend { font-weight: 600; padding: 0; margin-bottom: 6px; }
 .settings-card .hint { font-size: 13px; color: var(--muted); margin: 0; }
-.settings-card.about { margin-top: 16px; }
-.settings-card.about p { margin: 0; }
+/* Settings: a menu of sections on the left, the chosen section on the right. */
+.settings-layout { display: grid; grid-template-columns: 180px minmax(0, 1fr); gap: 16px; align-items: start; }
+.settings-nav { display: flex; flex-direction: column; gap: 2px; position: sticky; top: 12px; }
+.settings-nav a { padding: 7px 10px; border-radius: 6px; color: var(--muted); text-decoration: none; }
+.settings-nav a:hover { background: var(--hover); color: var(--text); }
+.settings-nav a.current { background: var(--hover); color: var(--text); font-weight: 600; }
 .import-result p { margin: 0 0 6px; }
 .settings-card .two { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
 .tag { font-size: 12px; color: var(--muted); border: 1px solid var(--border); border-radius: 4px; padding: 0 5px; margin-left: 6px; white-space: nowrap; }
@@ -250,6 +257,10 @@ td.group-label.level-2 { padding-left: 58px; }
 @media (max-width: 680px) {
   .topbar { gap: 10px; padding: 8px 12px; }
   .topbar .brand-name { display: none; }
+  /* No room for the email on a phone; the Log out button stays. */
+  #whoami { display: none; }
+  .topbar nav { gap: 0; }
+  .topbar nav a { padding: 6px 7px; }
   main#view { padding: 12px; }
   .picker, .filters { grid-template-columns: minmax(0, 1fr); }
   .filters.compact { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -259,6 +270,9 @@ td.group-label.level-2 { padding-left: 58px; }
   .entry { flex-wrap: wrap; }
   .entry-main { flex-basis: 100%; }
   .settings-card .two { grid-template-columns: minmax(0, 1fr); }
+  .settings-layout { grid-template-columns: minmax(0, 1fr); gap: 10px; }
+  .settings-nav { position: static; flex-direction: row; flex-wrap: wrap; gap: 4px; }
+  .settings-nav a { white-space: nowrap; padding: 5px 9px; }
   .group-head .entry-main { flex-basis: calc(100% - 40px); }
   .entry.grouped { padding-left: 14px; }
   .entry-actions { margin-left: auto; }
@@ -279,3 +293,10 @@ input.picker-proxy {
   width: 1px; height: 1px; padding: 0; border: 0;
   opacity: 0; pointer-events: none;
 }
+
+/* Settings → API */
+.settings-card .buttons { display: flex; gap: 8px; flex-wrap: wrap; }
+.api-key-row { display: flex; gap: 8px; margin: 6px 0; }
+.api-key-row .api-key { flex: 1; min-width: 0; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.api-example { font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; padding: 8px; border-radius: 6px; background: var(--hover); margin: 6px 0 0; }
+.settings-card code { font-size: 12.5px; overflow-wrap: anywhere; }

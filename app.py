@@ -1,5 +1,6 @@
 """Timelog: a time tracker (Customer > Project, entries described in free text); each user's data is separate."""
 import csv
+import hashlib
 import hmac
 import io
 import json
@@ -75,7 +76,9 @@ CREATE TABLE IF NOT EXISTS users (
     preferences TEXT NOT NULL DEFAULT '{}',
     disabled INTEGER NOT NULL DEFAULT 0,
     -- Stored in sessions; raising it logs the user out everywhere.
-    session_epoch INTEGER NOT NULL DEFAULT 0
+    session_epoch INTEGER NOT NULL DEFAULT 0,
+    -- SHA-256 of the user's API key (the key itself is shown once and never stored).
+    api_key_hash TEXT
 )
 """
 
@@ -105,6 +108,7 @@ CREATE TABLE IF NOT EXISTS {name} (
     source_id TEXT
 );
 """
+SCHEMA += "CREATE UNIQUE INDEX IF NOT EXISTS users_api_key ON users (api_key_hash);\n"
 SCHEMA = SCHEMA.replace("{users}", USERS_TABLE)
 SCHEMA = SCHEMA.replace("{customers}", CUSTOMERS_TABLE.format(name="customers"))
 SCHEMA = SCHEMA.replace("{entries}", ENTRIES_TABLE.format(name="entries"))
@@ -283,6 +287,7 @@ def init_db(path):
     add_customer_rate_column(conn)
     migrate_to_users(conn)
     add_entry_source_column(conn)
+    add_user_api_key_column(conn)
     conn.executescript(SCHEMA)
     conn.execute(
         "INSERT OR IGNORE INTO settings (key, value) VALUES ('secret_key', ?)",
@@ -332,6 +337,12 @@ def add_entry_source_column(conn):
     columns = table_columns(conn, "entries")
     if columns and "source_id" not in columns:
         conn.execute("ALTER TABLE entries ADD COLUMN source_id TEXT")
+
+
+def add_user_api_key_column(conn):
+    columns = table_columns(conn, "users")
+    if columns and "api_key_hash" not in columns:
+        conn.execute("ALTER TABLE users ADD COLUMN api_key_hash TEXT")
 
 
 def add_customer_rate_column(conn):
@@ -492,6 +503,23 @@ def add_user(conn, email):
     if find_user(conn, email):
         raise ValueError(f"A user with the email {email} already exists.")
     return conn.execute("INSERT INTO users (email) VALUES (?)", (email,)).lastrowid
+
+
+API_KEY_PREFIX = "tl_"
+
+
+def hash_api_key(key):
+    return hashlib.sha256(key.encode()).hexdigest()
+
+
+def user_for_api_key(conn, key):
+    """The enabled user owning this API key, or None."""
+    if not key.startswith(API_KEY_PREFIX):
+        return None
+    user = conn.execute(
+        "SELECT id, disabled FROM users WHERE api_key_hash = ?", (hash_api_key(key),)
+    ).fetchone()
+    return user["id"] if user and not user["disabled"] else None
 
 
 # --- Sign in with GitHub ---
@@ -769,7 +797,8 @@ def create_app(db_path=None):
     @app.middleware("http")
     async def protect(request, call_next):
         path = request.url.path
-        if path == "/login" or path.startswith(("/static/", "/auth/")):
+        # /api/v1/ is the public API: its routes check an API key instead of the session.
+        if path == "/login" or path.startswith(("/static/", "/auth/", "/api/v1/")):
             response = await call_next(request)
         else:
             user_id = await run_in_threadpool(session_user, request.session)
@@ -971,6 +1000,42 @@ def create_app(db_path=None):
         register_item_routes(kind)
 
     # --- Timer ---
+
+    # --- API key and the public API ---
+
+    @app.get("/api/api-key", tags=["api key"])
+    def api_key_status(uid: UserId):
+        with reading() as conn:
+            row = conn.execute("SELECT api_key_hash FROM users WHERE id = ?", (uid,)).fetchone()
+        return {"exists": row["api_key_hash"] is not None}
+
+    @app.post("/api/api-key", tags=["api key"])
+    def api_key_create(uid: UserId):
+        """Makes a new API key, replacing the old one. The key is only ever shown in this answer."""
+        key = API_KEY_PREFIX + secrets.token_urlsafe(32)
+        with writing() as conn:
+            conn.execute("UPDATE users SET api_key_hash = ? WHERE id = ?", (hash_api_key(key), uid))
+        return {"key": key}
+
+    @app.delete("/api/api-key", tags=["api key"])
+    def api_key_delete(uid: UserId):
+        with writing() as conn:
+            conn.execute("UPDATE users SET api_key_hash = NULL WHERE id = ?", (uid,))
+        return {"exists": False}
+
+    @app.get("/api/v1/timer", tags=["public api"])
+    def public_timer(request: Request):
+        """The current timer, for scripts and widgets. Send `Authorization: Bearer <API key>`."""
+        scheme, _, key = request.headers.get("authorization", "").partition(" ")
+        with reading() as conn:
+            uid = user_for_api_key(conn, key.strip()) if scheme.lower() == "bearer" else None
+            if uid is None:
+                return JSONResponse(
+                    {"error": "Missing or wrong API key."},
+                    status_code=401,
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+            return public_timer_payload(conn, uid)
 
     @app.get("/api/timer", tags=["timer"])
     def timer(uid: UserId):
@@ -1215,6 +1280,46 @@ def timer_payload(conn, user_id):
         "SELECT * FROM entries WHERE user_id = ? AND state != 'stopped'", (user_id,)
     ).fetchone()
     return {"active": serialize_entries(conn, [row])[0] if row else None, "now": now_ts()}
+
+
+def iso_utc(ts):
+    return datetime.fromtimestamp(ts, tz=ZoneInfo("UTC")).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def public_timer_payload(conn, user_id):
+    """The user's running or paused entry with its project and customer names."""
+    now = now_ts()
+    row = conn.execute(
+        """
+        SELECT e.id, e.description, e.billable, e.state, p.name AS project, c.name AS customer
+        FROM entries e JOIN projects p ON p.id = e.project_id JOIN customers c ON c.id = p.customer_id
+        WHERE e.user_id = ? AND e.state != 'stopped'
+        """,
+        (user_id,),
+    ).fetchone()
+    if row is None:
+        return {"running": False, "entry": None, "now": iso_utc(now)}
+    segments = conn.execute(
+        "SELECT start_ts, end_ts FROM segments WHERE entry_id = ? ORDER BY start_ts", (row["id"],)
+    ).fetchall()
+    elapsed = sum((seg["end_ts"] or now) - seg["start_ts"] for seg in segments)
+    open_segment = next((seg for seg in segments if seg["end_ts"] is None), None)
+    hours, rest = divmod(max(elapsed, 0), 3600)
+    return {
+        "running": row["state"] == "running",
+        "entry": {
+            "state": row["state"],
+            "description": row["description"],
+            "project": row["project"],
+            "customer": row["customer"],
+            "billable": bool(row["billable"]),
+            "started_at": iso_utc(segments[0]["start_ts"]) if segments else None,
+            "running_since": iso_utc(open_segment["start_ts"]) if open_segment else None,
+            "elapsed_seconds": elapsed,
+            "elapsed": f"{hours}:{rest // 60:02d}:{rest % 60:02d}",
+        },
+        "now": iso_utc(now),
+    }
 
 
 def active_entry(conn, user_id, *states):

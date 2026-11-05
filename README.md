@@ -37,6 +37,16 @@ time.example.com {
 }
 ```
 
+### Staging
+
+`compose.staging.yml` runs a second copy on `127.0.0.1:8001` for trying changes first. It uses the code in your checkout directly (mounted read-only, reloading when `app.py` changes), so there is nothing to rebuild while you work; production keeps running its image until you rebuild it. Staging has its own database and its own settings file, `.env.staging`, which needs its own GitHub OAuth app with the staging host's callback URL.
+
+```sh
+cp .env.example .env.staging   # the staging OAuth app, and TIMELOG_BASE_URL=https://staging.example.com
+docker compose -p timelog-staging -f compose.staging.yml up -d --build
+docker compose -p timelog-staging -f compose.staging.yml exec timelog python app.py add-user you@example.com
+```
+
 ## Backups
 
 ```sh
@@ -103,6 +113,34 @@ The GitHub OAuth app needs `http://localhost:8000/auth/github/callback` as a sec
 ## API docs
 
 Interactive docs are at `/docs` once you are logged in, and the schema is at `/openapi.json`. The `/docs` page loads Swagger UI from the jsDelivr CDN; the rest of the app loads nothing from third parties.
+
+## Timer API
+
+Scripts, status bars and widgets can read your running timer. Make an API key under **Settings → API** (it is shown once; only a hash is stored, and making a new one replaces it), then:
+
+```sh
+curl -H "Authorization: Bearer tl_..." https://<your-host>/api/v1/timer
+```
+
+```json
+{
+  "running": true,
+  "entry": {
+    "state": "running",
+    "description": "Fix login bug",
+    "project": "Website",
+    "customer": "Acme",
+    "billable": true,
+    "started_at": "2026-11-05T08:00:00Z",
+    "running_since": "2026-11-05T09:30:00Z",
+    "elapsed_seconds": 4500,
+    "elapsed": "1:15:00"
+  },
+  "now": "2026-11-05T09:45:00Z"
+}
+```
+
+`entry` is `null` when no timer is on. A paused timer has `"running": false`, `"state": "paused"` and `"running_since": null`. Times are UTC; `elapsed_seconds` counts only the time the timer has run. A missing or wrong key gets 401.
 
 ## Settings in the app
 

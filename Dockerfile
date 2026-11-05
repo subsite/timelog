@@ -13,5 +13,5 @@ ENV TIMELOG_DB=/data/timelog.db
 VOLUME /data
 EXPOSE 8000
 
-# One worker: the login rate limit is kept in memory.
+# One worker is enough; the app keeps no state in memory between requests.
 CMD ["uvicorn", "app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000", "--no-proxy-headers"]

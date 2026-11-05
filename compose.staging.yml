@@ -1,0 +1,31 @@
+# Optional staging copy for trying changes before they reach production:
+#   docker compose -p timelog-staging -f compose.staging.yml up -d --build
+# It runs the code from this checkout (mounted read-only) instead of the image's copy:
+# static files and templates change at once, and uvicorn's --reload restarts it when
+# app.py changes. It has its own database and settings (.env.staging, with its own
+# GitHub OAuth app whose callback is https://<staging-host>/auth/github/callback).
+services:
+  timelog:
+    build: .
+    restart: unless-stopped
+    env_file: .env.staging
+    ports:
+      - "127.0.0.1:8001:8000"
+    volumes:
+      - .:/app:ro
+      - data:/data
+    # Hide a host virtualenv: the reloader would poll every .py file in it.
+    tmpfs:
+      - /app/.venv
+    command:
+      - uvicorn
+      - app:create_app
+      - --factory
+      - --host=0.0.0.0
+      - --port=8000
+      - --no-proxy-headers
+      - --reload
+      - --reload-dir=/app
+
+volumes:
+  data:
