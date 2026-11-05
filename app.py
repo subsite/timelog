@@ -1,4 +1,5 @@
 """Timelog: a time tracker (Customer > Project, entries described in free text); each user's data is separate."""
+import asyncio
 import csv
 import hashlib
 import hmac
@@ -22,7 +23,7 @@ from zoneinfo import ZoneInfo
 
 from fastapi import Depends, FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
@@ -507,6 +508,67 @@ def add_user(conn, email):
 
 API_KEY_PREFIX = "tl_"
 
+# Timer streams send a comment this often, so proxies do not close an idle connection.
+STREAM_KEEPALIVE = 25
+
+
+class TimerHub:
+    """Each user's open timer streams, so a change made anywhere reaches them at once.
+
+    Kept in memory, which works because the app runs as a single process. Everything here
+    runs on the event loop (the protect middleware and the stream generators)."""
+
+    def __init__(self):
+        self.streams = {}
+
+    def subscribe(self, user_id):
+        wake = asyncio.Event()
+        self.streams.setdefault(user_id, set()).add(wake)
+        return wake
+
+    def unsubscribe(self, user_id, wake):
+        streams = self.streams.get(user_id, set())
+        streams.discard(wake)
+        if not streams:
+            self.streams.pop(user_id, None)
+
+    def notify(self, user_id):
+        for wake in self.streams.get(user_id, ()):
+            wake.set()
+
+
+async def timer_events(hub, user_id, render):
+    """Server-sent events: the timer whenever it changes. render() runs in a thread and returns
+    (what counts as a change, the data to send), or None once the client may no longer read it."""
+    wake = hub.subscribe(user_id)
+    try:
+        yield "retry: 5000\n\n"
+        last = object()
+        while True:
+            wake.clear()
+            result = await run_in_threadpool(render)
+            if result is None:
+                return
+            signature, data = result
+            if signature != last:
+                last = signature
+                yield f"event: timer\ndata: {json.dumps(data)}\n\n"
+            try:
+                await asyncio.wait_for(wake.wait(), STREAM_KEEPALIVE)
+            except asyncio.TimeoutError:
+                yield ": keepalive\n\n"
+    finally:
+        hub.unsubscribe(user_id, wake)
+
+
+def event_stream(events):
+    return StreamingResponse(
+        events,
+        media_type="text/event-stream",
+        # X-Accel-Buffering stops nginx-style proxies from holding events back.
+        headers={"X-Accel-Buffering": "no"},
+    )
+
 
 def hash_api_key(key):
     return hashlib.sha256(key.encode()).hexdigest()
@@ -795,6 +857,7 @@ def create_app(db_path=None):
         return user_id
 
     app = FastAPI(title="Timelog", docs_url="/docs", redoc_url=None)
+    hub = app.state.timer_hub = TimerHub()
 
     @app.middleware("http")
     async def protect(request, call_next):
@@ -807,6 +870,9 @@ def create_app(db_path=None):
             if user_id is not None:
                 request.state.user_id = user_id
                 response = await call_next(request)
+                # Any change may concern the timer (an edit, a renamed project): streams check.
+                if request.method != "GET" and response.status_code < 400:
+                    hub.notify(user_id)
             elif path.startswith("/api/"):
                 response = JSONResponse({"error": "Not logged in"}, status_code=401)
             else:
@@ -1028,6 +1094,31 @@ def create_app(db_path=None):
             conn.execute("UPDATE users SET api_key_hash = NULL WHERE id = ?", (uid,))
         return {"exists": False}
 
+    @app.get("/api/v1/timer/stream", tags=["public api"])
+    def public_timer_stream(request: Request):
+        """Server-sent events: a `timer` event with the same JSON as /api/v1/timer, sent at once
+        and again whenever the timer changes. Send `Authorization: Bearer <API key>`."""
+        scheme, _, key = request.headers.get("authorization", "").partition(" ")
+        key = key.strip()
+        with reading() as conn:
+            uid = user_for_api_key(conn, key) if scheme.lower() == "bearer" else None
+        if uid is None:
+            return JSONResponse(
+                {"error": "Missing or wrong API key."}, status_code=401, headers={"WWW-Authenticate": "Bearer"}
+            )
+
+        def render():
+            with reading() as conn:
+                if user_for_api_key(conn, key) != uid:
+                    return None
+                data = public_timer_payload(conn, uid)
+            entry = data["entry"]
+            # Elapsed time grows by itself; only real changes are sent.
+            signature = entry and {k: v for k, v in entry.items() if k not in ("elapsed_seconds", "elapsed")}
+            return signature, data
+
+        return event_stream(timer_events(hub, uid, render))
+
     @app.get("/api/v1/timer", tags=["public api"])
     def public_timer(request: Request):
         """The current timer, for scripts and widgets. Send `Authorization: Bearer <API key>`."""
@@ -1041,6 +1132,21 @@ def create_app(db_path=None):
                     headers={"WWW-Authenticate": "Bearer"},
                 )
             return public_timer_payload(conn, uid)
+
+    @app.get("/api/timer/stream", tags=["timer"])
+    def timer_stream(request: Request, uid: UserId):
+        """Server-sent events for the app itself: a `timer` event with the same JSON as
+        /api/timer, at once and whenever another device or script changes the timer."""
+        session = dict(request.session)
+
+        def render():
+            if session_user(session) != uid:
+                return None
+            with reading() as conn:
+                data = timer_payload(conn, uid)
+            return data["active"], data
+
+        return event_stream(timer_events(hub, uid, render))
 
     @app.get("/api/timer", tags=["timer"])
     def timer(uid: UserId):

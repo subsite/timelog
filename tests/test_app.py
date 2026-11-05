@@ -1,7 +1,10 @@
 import csv
 import io
+import json
 import sqlite3
 import sys
+import threading
+import time
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -1368,3 +1371,56 @@ def test_environment_label(tmp_path, monkeypatch, github):
     assert 'class="env-badge">Staging<' in page and "<title>Log in · Timelog Staging</title>" in page
     sign_in(client)
     assert client.get("/api/me").json() == {"email": "me@example.com", "environment": "Staging"}
+
+
+def read_events(response, count):
+    """The first `count` timer events of a server-sent event stream, as parsed JSON."""
+    events = []
+    for line in response.iter_lines():
+        if line.startswith("data: "):
+            events.append(json.loads(line[6:]))
+            if len(events) == count:
+                break
+    return events
+
+
+def later(action, delay=0.3):
+    thread = threading.Thread(target=lambda: (time.sleep(delay), action()), daemon=True)
+    thread.start()
+    return thread
+
+
+def test_timer_stream_sends_changes(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(timelog, "STREAM_KEEPALIVE", 0.2)
+    project_id = add_project(client)
+    helper = TestClient(client.app, cookies=client.cookies)
+    with client.stream("GET", "/api/timer/stream") as response:
+        assert response.headers["content-type"].startswith("text/event-stream")
+        later(lambda: helper.post("/api/timer/start", json={"project_id": project_id, "description": "Live"}))
+        first, second = read_events(response, 2)
+    assert first["active"] is None
+    assert second["active"]["description"] == "Live" and second["active"]["state"] == "running"
+
+    # Logging the user out everywhere ends the stream.
+    monkeypatch.setenv("TIMELOG_DB", str(tmp_path / "test.db"))
+    with client.stream("GET", "/api/timer/stream") as response:
+        later(lambda: timelog.cli(["logout-user", "me@example.com"]))
+        lines = list(response.iter_lines())
+    assert sum(line.startswith("data: ") for line in lines) == 1
+
+
+def test_public_timer_stream(client, monkeypatch):
+    monkeypatch.setattr(timelog, "STREAM_KEEPALIVE", 0.2)
+    project_id = add_project(client, "Acme", "Website")
+    key = client.post("/api/api-key").json()["key"]
+    outsider = TestClient(client.app)
+    assert outsider.get("/api/v1/timer/stream", headers={"Authorization": "Bearer tl_wrong"}).status_code == 401
+
+    with outsider.stream("GET", "/api/v1/timer/stream", headers={"Authorization": f"Bearer {key}"}) as response:
+        later(lambda: client.post("/api/timer/start", json={"project_id": project_id}))
+        later(lambda: client.post("/api/timer/pause"), delay=0.6)
+        later(lambda: client.delete("/api/api-key"), delay=0.9)  # Ends the stream.
+        lines = list(response.iter_lines())
+    events = [json.loads(line[6:]) for line in lines if line.startswith("data: ")]
+    assert [e["entry"] and e["entry"]["state"] for e in events] == [None, "running", "paused"]
+    assert events[1]["entry"]["project"] == "Website" and events[1]["entry"]["customer"] == "Acme"

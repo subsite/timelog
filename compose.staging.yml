@@ -26,6 +26,8 @@ services:
       - --no-proxy-headers
       - --reload
       - --reload-dir=/app
+      # Open timer streams would otherwise hold up every reload.
+      - --timeout-graceful-shutdown=3
 
 volumes:
   data:

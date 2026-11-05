@@ -1685,6 +1685,22 @@ document.addEventListener("visibilitychange", () => {
   }
 });
 
+// Live updates: the server sends the timer whenever it changes, for example when it is
+// started on another device or by a script. EventSource reconnects by itself.
+function listenForTimer() {
+  if (!window.EventSource) return;
+  const source = new EventSource("/api/timer/stream");
+  source.addEventListener("timer", (event) => {
+    const before = JSON.stringify(S.active);
+    applyTimer(JSON.parse(event.data));
+    if (JSON.stringify(S.active) === before) return;
+    // Leave an open dialog alone; the page catches up when it is next shown.
+    if (S.route !== "timer" || document.querySelector("dialog[open]")) return;
+    renderTimerCard();
+    guard(loadEntries)();
+  });
+}
+
 window.addEventListener("hashchange", navigate);
 guard(async () => {
   await loadPreferences();
@@ -1692,4 +1708,5 @@ guard(async () => {
   const me = await api("/api/me");
   document.getElementById("whoami").textContent = me.email;
   showEnvironment(me.environment);
+  listenForTimer();
 })().then(navigate);

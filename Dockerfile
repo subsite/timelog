@@ -13,5 +13,6 @@ ENV TIMELOG_DB=/data/timelog.db
 VOLUME /data
 EXPOSE 8000
 
-# One worker is enough; the app keeps no state in memory between requests.
-CMD ["uvicorn", "app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000", "--no-proxy-headers"]
+# One worker only: open timer streams are tracked in memory (TimerHub in app.py).
+# Open timer streams never end by themselves, so a restart waits at most 3 seconds for them.
+CMD ["uvicorn", "app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000", "--no-proxy-headers", "--timeout-graceful-shutdown", "3"]

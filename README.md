@@ -143,6 +143,14 @@ curl -H "Authorization: Bearer tl_..." https://<your-host>/api/v1/timer
 
 `entry` is `null` when no timer is on. A paused timer has `"running": false`, `"state": "paused"` and `"running_since": null`. Times are UTC; `elapsed_seconds` counts only the time the timer has run. A missing or wrong key gets 401.
 
+To hear about changes as they happen instead of asking again and again, read the stream: it sends the same JSON as a `timer` server-sent event at once and then whenever the timer is started, paused, resumed, stopped or edited (a comment line every 25 seconds keeps the connection open; elapsed time is not re-sent, so count it from `running_since`). The stream ends if the key is removed.
+
+```sh
+curl -N -H "Authorization: Bearer tl_..." https://<your-host>/api/v1/timer/stream
+```
+
+The app itself uses the same kind of stream, so a timer started on your phone shows up on your laptop within a second.
+
 ## Settings in the app
 
 Under **Settings**: theme (system, day, night), date format (ISO text with a calendar button, or the browser's locale), billing rounding, currency (EUR by default) and a default hourly rate. A customer's own rate is set under **Manage → Edit**. The currency is only a display label: amounts are plain numbers, and CSV exports have no currency.
