@@ -753,6 +753,8 @@ def create_app(db_path=None):
     github_client_secret = os.environ.get("TIMELOG_GITHUB_CLIENT_SECRET", "")
     base_url = os.environ.get("TIMELOG_BASE_URL", "http://localhost:8000").rstrip("/")
     open_signup = os.environ.get("TIMELOG_OPEN_SIGNUP") == "1"
+    # A label such as "Staging", shown in red on every page so this copy is not taken for production.
+    environment = os.environ.get("TIMELOG_ENVIRONMENT", "").strip()[:20]
     github_callback = f"{base_url}/auth/github/callback"
     templates = Jinja2Templates(directory=BASE_DIR / "templates")
 
@@ -854,7 +856,7 @@ def create_app(db_path=None):
         return templates.TemplateResponse(
             request,
             "login.html",
-            {"configured": bool(github_client_id and github_client_secret), "error": error},
+            {"configured": bool(github_client_id and github_client_secret), "error": error, "environment": environment},
         )
 
     @app.get("/auth/github", include_in_schema=False)
@@ -917,7 +919,10 @@ def create_app(db_path=None):
     @app.get("/api/me", tags=["preferences"])
     def me(uid: UserId):
         with reading() as conn:
-            return {"email": conn.execute("SELECT email FROM users WHERE id = ?", (uid,)).fetchone()["email"]}
+            me = {"email": conn.execute("SELECT email FROM users WHERE id = ?", (uid,)).fetchone()["email"]}
+        if environment:
+            me["environment"] = environment
+        return me
 
     # --- Customers and projects ---
 

@@ -1359,3 +1359,12 @@ def test_users_table_gets_api_key_column(tmp_path):
     assert "api_key_hash" in timelog.table_columns(conn, "users")
     assert [tuple(row) for row in conn.execute("SELECT email, api_key_hash FROM users")] == [("me@example.com", None)]
     conn.close()
+
+
+def test_environment_label(tmp_path, monkeypatch, github):
+    monkeypatch.setenv("TIMELOG_ENVIRONMENT", "Staging")
+    client = make_client(tmp_path / "staging.db", monkeypatch)
+    page = client.get("/login").text
+    assert 'class="env-badge">Staging<' in page and "<title>Log in · Timelog Staging</title>" in page
+    sign_in(client)
+    assert client.get("/api/me").json() == {"email": "me@example.com", "environment": "Staging"}

@@ -108,6 +108,7 @@ The GitHub OAuth app needs `http://localhost:8000/auth/github/callback` as a sec
 | `TIMELOG_GITHUB_CLIENT_ID` | none | GitHub OAuth app's client ID |
 | `TIMELOG_GITHUB_CLIENT_SECRET` | none | GitHub OAuth app's client secret |
 | `TIMELOG_BASE_URL` | `http://localhost:8000` | Where users reach Timelog; the GitHub callback is built from it |
+| `TIMELOG_ENVIRONMENT` | unset | A label such as `Staging`, shown in red on every page so a test copy is not mistaken for production |
 | `TIMELOG_INSECURE_COOKIES` | off | Allow sessions over plain HTTP, for local use only |
 
 ## API docs

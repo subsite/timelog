@@ -300,3 +300,14 @@ input.picker-proxy {
 .api-key-row .api-key { flex: 1; min-width: 0; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 .api-example { font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; padding: 8px; border-radius: 6px; background: var(--hover); margin: 6px 0 0; }
 .settings-card code { font-size: 12.5px; overflow-wrap: anywhere; }
+
+/* Marks a non-production copy (TIMELOG_ENVIRONMENT): a red label and a red line along the top. */
+.env-badge {
+  display: inline-block; padding: 2px 8px; border-radius: 999px;
+  background: #c62828; color: #fff;
+  font-size: 12px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase;
+  white-space: nowrap; vertical-align: middle;
+}
+.non-production .topbar { border-top: 4px solid #c62828; }
+.login-card .env-badge { margin-left: 4px; }
+body.non-production { border-top: 4px solid #c62828; }

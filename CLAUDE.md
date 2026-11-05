@@ -37,7 +37,7 @@ docker compose exec timelog python app.py add-user you@example.com
 
 No linter or formatter is configured.
 
-Environment (`.env`, never committed; template in `.env.example`): `TIMELOG_DB` (default `data/timelog.db`), `TIMELOG_GITHUB_CLIENT_ID`/`TIMELOG_GITHUB_CLIENT_SECRET`, `TIMELOG_BASE_URL` (the GitHub callback is `<base>/auth/github/callback`), `TIMELOG_OPEN_SIGNUP=1` (anyone with GitHub can sign up), `TIMELOG_INSECURE_COOKIES=1` (local HTTP only). The SMTP settings in `.env.example` are for planned email sign-in codes and are not used yet.
+Environment (`.env`, never committed; template in `.env.example`): `TIMELOG_DB` (default `data/timelog.db`), `TIMELOG_GITHUB_CLIENT_ID`/`TIMELOG_GITHUB_CLIENT_SECRET`, `TIMELOG_BASE_URL` (the GitHub callback is `<base>/auth/github/callback`), `TIMELOG_OPEN_SIGNUP=1` (anyone with GitHub can sign up), `TIMELOG_ENVIRONMENT` (e.g. `Staging`: a red label, a red top line and the name in the tab title; returned by `/api/me` only when set), `TIMELOG_INSECURE_COOKIES=1` (local HTTP only). The SMTP settings in `.env.example` are for planned email sign-in codes and are not used yet.
 
 ## Architecture
 

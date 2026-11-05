@@ -667,7 +667,17 @@ async function refreshTimer() {
 }
 
 function updateTitle() {
-  document.title = S.active ? `${S.active.state === "paused" ? "Paused" : fmtClock(entrySeconds(S.active))} · Timelog` : "Timelog";
+  const name = S.environment ? `Timelog ${S.environment}` : "Timelog";
+  document.title = S.active ? `${S.active.state === "paused" ? "Paused" : fmtClock(entrySeconds(S.active))} · ${name}` : name;
+}
+
+// A non-production copy (TIMELOG_ENVIRONMENT, e.g. "Staging") is marked in red.
+function showEnvironment(name) {
+  if (!name) return;
+  S.environment = name;
+  document.documentElement.classList.add("non-production");
+  document.querySelector(".topbar .brand").after(h("span", { class: "env-badge", title: "Not the production site" }, name));
+  updateTitle();
 }
 
 function renderTimerCard() {
@@ -1679,5 +1689,7 @@ window.addEventListener("hashchange", navigate);
 guard(async () => {
   await loadPreferences();
   applyTimer(await api("/api/timer"));
-  document.getElementById("whoami").textContent = (await api("/api/me")).email;
+  const me = await api("/api/me");
+  document.getElementById("whoami").textContent = me.email;
+  showEnvironment(me.environment);
 })().then(navigate);
