@@ -2,6 +2,12 @@
 
 Timelog is versioned by release date (`YYYY.MM.DD`, with `.2`, `.3`… for further releases on the same day). Every production deploy with `./deploy.sh` is a release: it adds a section here listing the commits since the previous release, and tags it `v<version>`.
 
+## 2026.11.14 (2026-11-14)
+
+- Narrower page column and a summary card beside the Timer page on wide screens
+- Running timer in the top bar on other pages; STAGING label hidden on phones
+- Date-based versions: releases, changelog and version history in Settings
+
 ## 2026.11.05 (2026-11-05)
 
 - Timer API with API keys, Settings sections menu, staging environment
