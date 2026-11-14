@@ -659,6 +659,23 @@ function applyTimer(data) {
   S.active = data.active;
   S.offset = data.now - Math.floor(Date.now() / 1000);
   updateTitle();
+  renderNavTimer();
+}
+
+// Outside the Timer page, the running or paused timer is shown in the top bar.
+function renderNavTimer() {
+  const link = document.getElementById("nav-timer");
+  const entry = S.active;
+  link.hidden = !entry || S.route === "timer";
+  if (link.hidden) return;
+  const paused = entry.state === "paused";
+  link.classList.toggle("paused", paused);
+  link.title = `${paused ? "Paused" : "Running"}: ${entry.description || "(no description)"} – ${pathLabel(entry.project_id)}`;
+  link.replaceChildren(
+    h("span", { class: "nav-timer-dot", "aria-hidden": "true" }),
+    h("span", { class: "nav-timer-clock" }, fmtClock(entrySeconds(entry))),
+    h("span", { class: "nav-timer-text" }, entry.description || pathLabel(entry.project_id))
+  );
 }
 
 async function refreshTimer() {
@@ -1756,14 +1773,18 @@ const navigate = guard(async () => {
     link.classList.toggle("current", link.dataset.route === S.route);
   }
   await loadTree();
+  renderNavTimer();
   await routes[S.route]();
 });
 
 setInterval(() => {
   if (!S.active) return;
   updateTitle();
+  if (S.active.state !== "running") return;
   const elapsed = document.getElementById("elapsed");
-  if (elapsed && S.active.state === "running") elapsed.textContent = fmtClock(entrySeconds(S.active));
+  if (elapsed) elapsed.textContent = fmtClock(entrySeconds(S.active));
+  const navClock = document.querySelector("#nav-timer:not([hidden]) .nav-timer-clock");
+  if (navClock) navClock.textContent = fmtClock(entrySeconds(S.active));
 }, 1000);
 
 // Another device may have changed the timer while this tab was in the background.
