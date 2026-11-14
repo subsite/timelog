@@ -9,6 +9,9 @@ services:
     build: .
     restart: unless-stopped
     env_file: .env.staging
+    environment:
+      # Staging runs whatever is in the checkout, not a release.
+      TIMELOG_VERSION: dev
     ports:
       - "127.0.0.1:8001:8000"
     volumes:

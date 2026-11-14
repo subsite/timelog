@@ -6,12 +6,16 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app.py .
 COPY static static
 COPY templates templates
+COPY CHANGELOG.md .
 
 RUN useradd --system --uid 1000 timelog && mkdir /data && chown timelog /data
 USER timelog
 ENV TIMELOG_DB=/data/timelog.db
 VOLUME /data
 EXPOSE 8000
+# Set by deploy.sh (see compose.yml); shown in Settings → About.
+ARG TIMELOG_VERSION=unknown
+ENV TIMELOG_VERSION=$TIMELOG_VERSION
 
 # One worker only: open timer streams are tracked in memory (TimerHub in app.py).
 # Open timer streams never end by themselves, so a restart waits at most 3 seconds for them.

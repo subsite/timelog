@@ -1570,6 +1570,7 @@ async function showSettings() {
         h("p", {}, "Timelog is made by ", link("https://subsite.fi", "SubSite"), "."),
         h("p", {}, "Timelog is free software: you can share and change it under the GNU General Public License, version 3 or later."),
         h("p", {}, "Source code, issues and the license: ", link(REPO_URL, REPO_URL.replace("https://", ""))),
+        versionHistory(),
       ],
     ],
   ];
@@ -1595,6 +1596,42 @@ async function showSettings() {
 }
 
 const REPO_URL = "https://github.com/subsite/timelog";
+
+// Settings → About: the running version and the release history (CHANGELOG.md).
+function versionHistory() {
+  const box = h("div", { class: "settings-group versions" }, h("p", { class: "hint" }, "Loading version…"));
+  api("/api/version").then(
+    (data) => {
+      const current = data.history.find((release) => release.version === data.version);
+      box.replaceChildren(
+        h("p", {}, "Version ", h("strong", {}, data.version), current?.date ? ` (released ${current.date})` : ""),
+        data.history.length
+          ? h(
+              "div",
+              {},
+              h("h3", {}, "Version history"),
+              ...data.history.map((release, i) =>
+                h(
+                  "details",
+                  { open: i === 0 },
+                  h(
+                    "summary",
+                    {},
+                    h("strong", {}, release.version),
+                    release.date ? h("span", { class: "muted" }, ` ${release.date}`) : null,
+                    release.version === data.version ? h("span", { class: "version-current" }, "running") : null
+                  ),
+                  h("ul", {}, release.changes.map((change) => h("li", {}, change)))
+                )
+              )
+            )
+          : h("p", { class: "hint" }, "No releases yet.")
+      );
+    },
+    () => box.replaceChildren(h("p", { class: "hint" }, "Could not load the version."))
+  );
+  return box;
+}
 
 // Settings → API: make, replace or remove the key that lets scripts read the running timer.
 function apiKeySettings() {

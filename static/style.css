@@ -352,3 +352,11 @@ body.non-production { border-top: 4px solid #c62828; }
   .nav-timer-text { display: none; }
 }
 
+/* Settings → About: version history */
+.versions h3 { font-size: 14px; margin: 6px 0 4px; }
+.versions details { border-top: 1px solid var(--border); padding: 6px 0; }
+.versions summary { cursor: pointer; }
+.versions summary .version-current { margin-left: 6px; }
+.versions ul { margin: 6px 0 2px; padding-left: 20px; font-size: 14px; }
+.versions li { margin: 2px 0; }
+.version-current { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--accent); border: 1px solid currentColor; border-radius: 999px; padding: 0 6px; }

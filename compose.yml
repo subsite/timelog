@@ -1,6 +1,10 @@
 services:
   timelog:
-    build: .
+    build:
+      context: .
+      args:
+        # deploy.sh sets this to the release being deployed.
+        TIMELOG_VERSION: ${TIMELOG_VERSION:-unknown}
     restart: unless-stopped
     # GitHub sign-in settings; see .env.example.
     env_file: .env

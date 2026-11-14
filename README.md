@@ -39,6 +39,8 @@ time.example.com {
 
 To update a running server later, `./deploy.sh` checks that everything is committed, runs the tests (when `.venv` exists), builds the new image, backs up the database into the data volume (keeping the last 10 of these backups), replaces the container and waits until the app answers.
 
+Every deploy of new commits is also a release. Versions are release dates, like `2026.11.14` (then `2026.11.14.2` for a second release that day). The script lists the commits since the previous release in `CHANGELOG.md`, and once the new version is up it commits that as "Release <version>", tags it `v<version>`, pushes, and creates a GitHub release when the [GitHub CLI](https://cli.github.com/) is signed in. If the deploy fails, nothing is recorded. The running version and the history are shown under **Settings → About**.
+
 ### Staging
 
 `compose.staging.yml` runs a second copy on `127.0.0.1:8001` for trying changes first. It uses the code in your checkout directly (mounted read-only, reloading when `app.py` changes), so there is nothing to rebuild while you work; production keeps running its image until you rebuild it. Staging has its own database and its own settings file, `.env.staging`, which needs its own GitHub OAuth app with the staging host's callback URL.

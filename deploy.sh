@@ -3,7 +3,10 @@
 #
 #   ./deploy.sh            production: from committed code only, after the tests pass and a
 #                          database backup; the new image is built before the old container
-#                          stops, so the site is down only for a few seconds
+#                          stops, so the site is down only for a few seconds. Every deploy of
+#                          new commits is a release (see release.sh): once the app is up, the
+#                          CHANGELOG.md entry is committed, tagged v<version>, pushed, and
+#                          published as a GitHub release (when gh is signed in)
 #   ./deploy.sh staging    recreates the staging container (compose.staging.yml), e.g. after
 #                          changing .env.staging; code changes reach staging without this
 #
@@ -11,6 +14,7 @@
 set -eu
 
 cd "$(dirname "$0")"
+. ./release.sh
 
 if docker compose version >/dev/null 2>&1; then
     compose() { docker compose "$@"; }
@@ -69,10 +73,9 @@ if [ -n "$(git status --porcelain)" ]; then
     git status --short
     fail "commit or stash the changes above first"
 fi
-commit=$(git rev-parse --short HEAD)
-git fetch --quiet origin 2>/dev/null || true
+git fetch --quiet origin 2>/dev/null || echo "Note: could not fetch from origin."
 if upstream=$(git rev-parse --verify --quiet '@{upstream}'); then
-    [ "$(git rev-parse HEAD)" = "$upstream" ] || echo "Note: $commit is not the same as $(git rev-parse --abbrev-ref '@{upstream}') (unpushed or behind)."
+    git merge-base --is-ancestor "$upstream" HEAD || fail "origin has commits that are not here: pull first"
 fi
 
 if [ -x .venv/bin/pytest ]; then
@@ -82,11 +85,27 @@ else
     echo "Note: no .venv/bin/pytest, skipping the tests."
 fi
 
-say "Building the image for $commit"
+last=$(last_release_tag)
+if [ -n "$last" ] && [ "$(git rev-list -n 1 "$last")" = "$(git rev-parse HEAD)" ]; then
+    version=${last#v}
+    release=
+    say "No new commits since $last: deploying $version again"
+else
+    version=$(next_version)
+    release=yes
+    say "Releasing $version with these changes:"
+    changes_since "$last" | write_changelog "$version" "$(date +%Y-%m-%d)"
+    release_notes "$version"
+    # Undo the changelog entry if the deploy does not get through.
+    trap 'git checkout -q -- CHANGELOG.md' EXIT
+fi
+export TIMELOG_VERSION="$version"
+
+say "Building the image for $version"
 production build
 
 if [ -n "$(production ps -q timelog 2>/dev/null)" ]; then
-    backup="/data/backup-before-deploy-$(date +%Y%m%d-%H%M%S)-$commit.db"
+    backup="/data/backup-before-deploy-$(date +%Y%m%d-%H%M%S)-$version.db"
     say "Backing up the database to $backup (in the data volume)"
     production exec -T timelog python app.py backup "$backup"
     # Keep the 10 newest pre-deploy backups.
@@ -99,4 +118,23 @@ say "Replacing the container"
 recreate production
 wait_until_up 8000 production
 
-say "Production runs $commit: $(grep -E '^TIMELOG_BASE_URL=' .env | cut -d= -f2-)"
+if [ -n "$release" ]; then
+    say "Recording release $version"
+    git commit -q -m "Release $version" -- CHANGELOG.md
+    git tag -a "v$version" -m "Timelog $version"
+    trap - EXIT
+    # The app is already deployed: from here on, problems are reported but do not stop.
+    if git push -q --follow-tags origin HEAD; then
+        if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+            release_notes "$version" | gh release create "v$version" --title "Timelog $version" --notes-file - >/dev/null \
+                && echo "Published the GitHub release v$version." \
+                || echo "Note: could not create the GitHub release; the tag is pushed."
+        else
+            echo "Note: gh is not installed or not signed in, so there is no GitHub release page."
+        fi
+    else
+        echo "Note: pushing failed; run: git push --follow-tags origin HEAD"
+    fi
+fi
+
+say "Production runs $version: $(grep -E '^TIMELOG_BASE_URL=' .env | cut -d= -f2-)"

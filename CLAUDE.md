@@ -29,13 +29,16 @@ python app.py add-user <email>        # invite; also list-users, set-email, disa
 python app.py backup <destination>    # online SQLite backup, safe while running
 
 # Deploy (Docker; listens on 127.0.0.1:8000 behind an HTTPS reverse proxy)
-./deploy.sh                           # production: clean tree + tests + DB backup, then rebuild
+./deploy.sh                           # production release: clean tree + tests + changelog + DB backup + rebuild,
+                                      # then commits, tags v<version>, pushes and makes a GitHub release
 ./deploy.sh staging                   # recreate staging (needed only after .env.staging changes)
 docker compose up -d --build          # reads .env (GitHub client ID/secret, TIMELOG_BASE_URL)
 docker compose exec timelog python app.py add-user you@example.com
 ```
 
 **Staging** (https://timelog-staging.subsite.fi, 127.0.0.1:8001): `docker-compose -p timelog-staging -f compose.staging.yml up -d --build` runs this checkout mounted read-only with uvicorn `--reload`, so edits are live there at once (static files and templates immediately, `app.py` on save) — try changes on staging, and only rebuild production (`docker-compose up -d --build`) from committed, tested code. Staging has its own database volume, its own GitHub OAuth app and settings in `.env.staging` (gitignored), and is invite-only: `docker-compose -p timelog-staging -f compose.staging.yml exec timelog python app.py add-user <email>`. On this server only docker-compose v1 is installed: use `docker-compose`, and if a rebuild fails with `KeyError: 'ContainerConfig'`, run `docker-compose rm -sf timelog` first. Production is https://timelog.subsite.fi (Apache proxies to 127.0.0.1:8000).
+
+**Versions** are release dates (`YYYY.MM.DD`, then `.2`…), made by `./deploy.sh` with the helpers in `release.sh`: it writes a `CHANGELOG.md` section from the commit subjects since the last `v*` tag (so write commit subjects for people), builds the image with `TIMELOG_VERSION` (a build arg from `compose.yml`), and only once the app answers commits "Release <version>", tags it, pushes and runs `gh release create`; a failed deploy restores `CHANGELOG.md`. Deploying a commit that is already tagged redeploys that version. Don't edit release sections in `CHANGELOG.md` by hand before a deploy. `GET /api/version` returns the running version and the parsed history (`parse_changelog()`), shown in Settings → About; staging reports `dev`.
 
 No linter or formatter is configured.
 

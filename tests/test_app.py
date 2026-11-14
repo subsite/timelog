@@ -1424,3 +1424,28 @@ def test_public_timer_stream(client, monkeypatch):
     events = [json.loads(line[6:]) for line in lines if line.startswith("data: ")]
     assert [e["entry"] and e["entry"]["state"] for e in events] == [None, "running", "paused"]
     assert events[1]["entry"]["project"] == "Website" and events[1]["entry"]["customer"] == "Acme"
+
+
+def test_version_and_history(client, tmp_path, monkeypatch):
+    changelog = tmp_path / "CHANGELOG.md"
+    changelog.write_text(
+        "# Changelog\n\nIntro text.\n\n## 2026.11.14.2 (2026-11-14)\n\n- Fix the thing\n\n"
+        "## 2026.11.14 (2026-11-14)\n\n- First thing\n- Second thing\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(timelog, "CHANGELOG_PATH", changelog)
+    monkeypatch.setenv("TIMELOG_VERSION", "2026.11.14")
+    assert client.get("/api/version").json() == {
+        "version": "2026.11.14",
+        "history": [
+            {"version": "2026.11.14.2", "date": "2026-11-14", "changes": ["Fix the thing"]},
+            {"version": "2026.11.14", "date": "2026-11-14", "changes": ["First thing", "Second thing"]},
+        ],
+    }
+    changelog.unlink()
+    monkeypatch.delenv("TIMELOG_VERSION")
+    assert client.get("/api/version").json() == {"version": "unknown", "history": []}
+
+
+def test_version_needs_sign_in(anon):
+    assert anon.get("/api/version").status_code == 401

@@ -31,6 +31,8 @@ from starlette.concurrency import run_in_threadpool
 from starlette.middleware.sessions import SessionMiddleware
 
 BASE_DIR = Path(__file__).parent
+# Releases are listed here by deploy.sh; the running version comes from the image (TIMELOG_VERSION).
+CHANGELOG_PATH = BASE_DIR / "CHANGELOG.md"
 
 SCHEMA = """
 -- Only the session secret; everything else belongs to a user.
@@ -982,6 +984,15 @@ def create_app(db_path=None):
             conn.execute("UPDATE users SET preferences = ? WHERE id = ?", (body.model_dump_json(), uid))
             return read_preferences(conn, uid)
 
+    @app.get("/api/version", tags=["preferences"])
+    def version(_uid: UserId):
+        """The running version and the release history from CHANGELOG.md, newest first."""
+        try:
+            history = parse_changelog(CHANGELOG_PATH.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            history = []
+        return {"version": os.environ.get("TIMELOG_VERSION") or "unknown", "history": history}
+
     @app.get("/api/me", tags=["preferences"])
     def me(uid: UserId):
         with reading() as conn:
@@ -1744,6 +1755,23 @@ def finish_children(node):
         }
         for child in children
     ]
+
+
+# --- Versions ---
+
+RELEASE_HEADING = re.compile(r"^## (\S+)(?: \((\d{4}-\d{2}-\d{2})\))?\s*$")
+
+
+def parse_changelog(text):
+    """Releases from CHANGELOG.md: each "## <version> (<date>)" heading and its "- " items."""
+    releases = []
+    for line in text.splitlines():
+        heading = RELEASE_HEADING.match(line)
+        if heading:
+            releases.append({"version": heading[1], "date": heading[2], "changes": []})
+        elif releases and line.startswith("- "):
+            releases[-1]["changes"].append(line[2:].strip())
+    return releases
 
 
 # --- Command line ---
