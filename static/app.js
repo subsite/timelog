@@ -759,6 +759,7 @@ async function loadEntries(append = false) {
   timerPage.entries = append ? timerPage.entries.concat(data.entries) : data.entries;
   timerPage.hasMore = data.has_more;
   renderEntries();
+  if (!append) guard(refreshSummary)();
   await loadRecent();
 }
 
@@ -942,18 +943,91 @@ function entryRow(entry, inGroup = false) {
 
 async function showTimer() {
   view.replaceChildren(
-    h("section", { class: "card", id: "timer-card" }),
     h(
       "div",
-      { class: "list-head" },
-      h("h1", { class: "list-title" }, "Logged time"),
-      h("button", { type: "button", onclick: () => openEntryEditor({ onSaved: () => loadEntries() }) }, "+ Add time")
-    ),
-    h("div", { id: "entries" })
+      { class: "timer-layout" },
+      h(
+        "div",
+        { class: "timer-main" },
+        h("section", { class: "card", id: "timer-card" }),
+        h(
+          "div",
+          { class: "list-head" },
+          h("h1", { class: "list-title" }, "Logged time"),
+          h("button", { type: "button", onclick: () => openEntryEditor({ onSaved: () => loadEntries() }) }, "+ Add time")
+        ),
+        h("div", { id: "entries" })
+      ),
+      h("aside", { class: "card timer-summary", id: "summary", "aria-label": "Summary" })
+    )
   );
   await refreshTimer();
   await loadEntries();
 }
+
+// --- Summary beside the Timer page (wide screens only) ---
+
+// Matches the CSS breakpoint that shows the summary card.
+const WIDE = window.matchMedia("(min-width: 1260px)");
+let summaryRequest = 0;
+
+async function refreshSummary() {
+  const host = document.getElementById("summary");
+  if (!host || !WIDE.matches) return;
+  const request = ++summaryRequest;
+  const today = new Date();
+  const ranges = [
+    ["Today", today, today],
+    ["This month", new Date(today.getFullYear(), today.getMonth(), 1), new Date(today.getFullYear(), today.getMonth() + 1, 0)],
+  ];
+  const reports = await Promise.all(
+    ranges.map(([, from, to]) => {
+      const params = new URLSearchParams({
+        tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        from: dateKey(from),
+        to: dateKey(to),
+        group: "customer,project",
+      });
+      return api(`/api/report?${params}`);
+    })
+  );
+  if (request !== summaryRequest) return;
+  host.replaceChildren(
+    h("h2", {}, "Summary"),
+    ...ranges.map(([title], i) => summaryBlock(title, reports[i]))
+  );
+}
+
+function summaryBlock(title, report) {
+  const projects = report.groups
+    .flatMap((customer) => customer.children.map((project) => ({ customer: customer.label, project: project.label, seconds: project.seconds })))
+    .sort((a, b) => b.seconds - a.seconds);
+  return h(
+    "section",
+    { class: "summary-block" },
+    h("div", { class: "summary-head" }, h("span", {}, title), h("strong", {}, fmtHM(report.total.seconds))),
+    projects.length
+      ? h(
+          "ul",
+          {},
+          projects.map((p) =>
+            h(
+              "li",
+              { title: `${p.customer} › ${p.project}` },
+              h("span", { class: "summary-name" }, p.project, h("small", {}, p.customer)),
+              h("span", { class: "summary-time" }, fmtHM(p.seconds))
+            )
+          )
+        )
+      : h("p", { class: "hint" }, "No time logged.")
+  );
+}
+
+WIDE.addEventListener("change", () => guard(refreshSummary)());
+// A running timer keeps adding time.
+setInterval(() => {
+  if (S.route === "timer" && S.active?.state === "running" && document.visibilityState === "visible") guard(refreshSummary)();
+}, 60000);
 
 // --- Reports page ---
 
@@ -1677,6 +1751,7 @@ const routes = { timer: showTimer, reports: showReports, manage: showManage, set
 const navigate = guard(async () => {
   const route = location.hash.slice(1).split("/")[0];
   S.route = routes[route] ? route : "timer";
+  view.classList.toggle("timer-page", S.route === "timer");
   for (const link of document.querySelectorAll("[data-route]")) {
     link.classList.toggle("current", link.dataset.route === S.route);
   }

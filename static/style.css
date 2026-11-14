@@ -76,7 +76,7 @@ h2 { font-size: 15px; margin: 0; }
 .topbar nav a.current { color: var(--text); font-weight: 600; background: var(--hover); }
 .topbar form { margin: 0; white-space: nowrap; }
 
-main#view { max-width: 980px; margin: 0 auto; padding: 20px; }
+main#view { max-width: 780px; margin: 0 auto; padding: 20px; }
 
 .card {
   background: var(--surface);
@@ -311,3 +311,23 @@ input.picker-proxy {
 .non-production .topbar { border-top: 4px solid #c62828; }
 .login-card .env-badge { margin-left: 4px; }
 body.non-production { border-top: 4px solid #c62828; }
+
+/* Timer page: on wide screens a summary card sits to the right of the main column;
+   otherwise it is hidden and the page stays one centered column. */
+.timer-summary { display: none; }
+@media (min-width: 1260px) {
+  main#view.timer-page { max-width: 1240px; }
+  .timer-layout { display: grid; grid-template-columns: minmax(0, 1fr) 427px; gap: 20px; align-items: start; }
+  .timer-summary { display: block; position: sticky; top: 16px; }
+}
+.timer-summary h2 { margin-bottom: 12px; }
+.summary-block + .summary-block { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border); }
+.summary-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 6px; }
+.summary-head span { color: var(--muted); font-size: 13px; }
+.summary-head strong { font-size: 20px; font-variant-numeric: tabular-nums; }
+.summary-block ul { list-style: none; margin: 0; padding: 0; }
+.summary-block li { display: flex; justify-content: space-between; gap: 12px; padding: 5px 0; font-size: 14px; }
+.summary-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.summary-name small { display: block; color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; }
+.summary-time { font-variant-numeric: tabular-nums; flex: none; }
+
