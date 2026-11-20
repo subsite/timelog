@@ -2,6 +2,10 @@
 
 Timelog is versioned by release date (`YYYY.MM.DD`, with `.2`, `.3`… for further releases on the same day). Every production deploy with `./deploy.sh` is a release: it adds a section here listing the commits since the previous release, and tags it `v<version>`.
 
+## 2026.11.20 (2026-11-20)
+
+- Pause, resume and stop the timer through the API
+
 ## 2026.11.14 (2026-11-14)
 
 - Narrower page column and a summary card beside the Timer page on wide screens
