@@ -1658,7 +1658,8 @@ function apiKeySettings() {
       h("p", { class: "hint" }, "Copy the key now. It is not stored and will not be shown again."),
       h("div", { class: "api-key-row" }, field, copy),
       h("pre", { class: "api-example" }, `curl -H "Authorization: Bearer ${key}" ${endpoint}`),
-      h("pre", { class: "api-example" }, `curl -N -H "Authorization: Bearer ${key}" ${endpoint}/stream`)
+      h("pre", { class: "api-example" }, `curl -N -H "Authorization: Bearer ${key}" ${endpoint}/stream`),
+      h("pre", { class: "api-example" }, `curl -X POST -H "Authorization: Bearer ${key}" ${endpoint}/pause`)
     );
     render(true);
   }
@@ -1702,6 +1703,17 @@ function apiKeySettings() {
       "Elapsed time is not re-sent while the timer runs, so count it from ",
       h("code", {}, "running_since"),
       ". A comment line every 25 seconds keeps the connection open, and the stream ends if the key is removed."
+    ),
+    h(
+      "p",
+      {},
+      "Scripts can also pause, resume and stop the timer: ",
+      h("code", {}, `POST ${endpoint}/pause`),
+      ", ",
+      h("code", {}, "/resume"),
+      " or ",
+      h("code", {}, "/stop"),
+      " with the same header. The answer is the timer after the change, or status 409 with an error message when there is nothing to pause, resume or stop."
     ),
     state,
     buttons,

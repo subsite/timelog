@@ -153,6 +153,12 @@ To hear about changes as they happen instead of asking again and again, read the
 curl -N -H "Authorization: Bearer tl_..." https://<your-host>/api/v1/timer/stream
 ```
 
+Scripts can also control the timer: `POST` to `/api/v1/timer/pause`, `/api/v1/timer/resume` or `/api/v1/timer/stop` with the same header. Each returns the timer as `/api/v1/timer` does after the change (after a stop, `entry` is `null`), or 409 with an `error` message when the timer is not in a state that allows it (nothing running to pause, nothing paused to resume, nothing on to stop). The app and any open streams update at once.
+
+```sh
+curl -X POST -H "Authorization: Bearer tl_..." https://<your-host>/api/v1/timer/pause
+```
+
 The app itself uses the same kind of stream, so a timer started on your phone shows up on your laptop within a second.
 
 ## Settings in the app

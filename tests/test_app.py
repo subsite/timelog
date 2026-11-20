@@ -1426,6 +1426,62 @@ def test_public_timer_stream(client, monkeypatch):
     assert events[1]["entry"]["project"] == "Website" and events[1]["entry"]["customer"] == "Acme"
 
 
+def test_api_key_controls_timer(client, other, clock):
+    key = client.post("/api/api-key").json()["key"]
+    outsider = TestClient(client.app)
+    auth = {"Authorization": f"Bearer {key}"}
+
+    def act(action, headers=auth):
+        return outsider.post(f"/api/v1/timer/{action}", headers=headers)
+
+    for action in ("pause", "resume", "stop"):
+        response = act(action)
+        assert response.status_code == 409 and "nothing to" in response.json()["error"]
+        assert act(action, {"Authorization": "Bearer tl_wrong"}).status_code == 401
+
+    project_id = add_project(client, "Acme", "Website")
+    t = clock.value
+    client.post("/api/timer/start", json={"project_id": project_id, "description": "Fix bug"})
+    other_project = add_project(other, "Other", "Theirs")
+    other.post("/api/timer/start", json={"project_id": other_project})
+
+    clock.value = t + 600
+    paused = act("pause").json()
+    assert paused["running"] is False and paused["entry"]["state"] == "paused"
+    assert paused["entry"]["elapsed_seconds"] == 600
+    assert act("pause").status_code == 409
+    assert client.get("/api/timer").json()["active"]["state"] == "paused"
+
+    clock.value = t + 900
+    resumed = act("resume").json()
+    assert resumed["running"] is True and resumed["entry"]["running_since"] == timelog.iso_utc(t + 900)
+    assert act("resume").status_code == 409
+
+    clock.value = t + 1000
+    assert act("stop").json() == {"running": False, "entry": None, "now": timelog.iso_utc(t + 1000)}
+    entry = client.get("/api/entries").json()["entries"][0]
+    assert entry["state"] == "stopped"
+    assert entry["segments"] == [{"start": t, "end": t + 600}, {"start": t + 900, "end": t + 1000}]
+    # Only the key's owner's timer changes.
+    assert other.get("/api/timer").json()["active"]["state"] == "running"
+
+
+def test_api_timer_change_reaches_app_streams(client, monkeypatch):
+    monkeypatch.setattr(timelog, "STREAM_KEEPALIVE", 0.2)
+    project_id = add_project(client, "Acme", "Website")
+    key = client.post("/api/api-key").json()["key"]
+    client.post("/api/timer/start", json={"project_id": project_id})
+    outsider = TestClient(client.app)
+    auth = {"Authorization": f"Bearer {key}"}
+
+    with outsider.stream("GET", "/api/v1/timer/stream", headers=auth) as response:
+        later(lambda: outsider.post("/api/v1/timer/pause", headers=auth))
+        later(lambda: client.delete("/api/api-key"), delay=0.6)
+        lines = list(response.iter_lines())
+    events = [json.loads(line[6:]) for line in lines if line.startswith("data: ")]
+    assert [e["entry"]["state"] for e in events] == ["running", "paused"]
+
+
 def test_version_and_history(client, tmp_path, monkeypatch):
     changelog = tmp_path / "CHANGELOG.md"
     changelog.write_text(

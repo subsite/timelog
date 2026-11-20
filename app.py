@@ -858,6 +858,21 @@ def create_app(db_path=None):
             return None
         return user_id
 
+    def api_key_owner(request):
+        """(user id, key) for the request's `Authorization: Bearer <key>`; the id is None
+        when the key is missing, wrong or belongs to a disabled user."""
+        scheme, _, key = request.headers.get("authorization", "").partition(" ")
+        key = key.strip()
+        if scheme.lower() != "bearer":
+            return None, key
+        with reading() as conn:
+            return user_for_api_key(conn, key), key
+
+    def wrong_api_key():
+        return JSONResponse(
+            {"error": "Missing or wrong API key."}, status_code=401, headers={"WWW-Authenticate": "Bearer"}
+        )
+
     app = FastAPI(title="Timelog", docs_url="/docs", redoc_url=None)
     hub = app.state.timer_hub = TimerHub()
 
@@ -1109,14 +1124,9 @@ def create_app(db_path=None):
     def public_timer_stream(request: Request):
         """Server-sent events: a `timer` event with the same JSON as /api/v1/timer, sent at once
         and again whenever the timer changes. Send `Authorization: Bearer <API key>`."""
-        scheme, _, key = request.headers.get("authorization", "").partition(" ")
-        key = key.strip()
-        with reading() as conn:
-            uid = user_for_api_key(conn, key) if scheme.lower() == "bearer" else None
+        uid, key = api_key_owner(request)
         if uid is None:
-            return JSONResponse(
-                {"error": "Missing or wrong API key."}, status_code=401, headers={"WWW-Authenticate": "Bearer"}
-            )
+            return wrong_api_key()
 
         def render():
             with reading() as conn:
@@ -1133,16 +1143,40 @@ def create_app(db_path=None):
     @app.get("/api/v1/timer", tags=["public api"])
     def public_timer(request: Request):
         """The current timer, for scripts and widgets. Send `Authorization: Bearer <API key>`."""
-        scheme, _, key = request.headers.get("authorization", "").partition(" ")
+        uid, _key = api_key_owner(request)
+        if uid is None:
+            return wrong_api_key()
         with reading() as conn:
-            uid = user_for_api_key(conn, key.strip()) if scheme.lower() == "bearer" else None
-            if uid is None:
-                return JSONResponse(
-                    {"error": "Missing or wrong API key."},
-                    status_code=401,
-                    headers={"WWW-Authenticate": "Bearer"},
-                )
             return public_timer_payload(conn, uid)
+
+    def public_timer_change(request, action):
+        uid, _key = api_key_owner(request)
+        if uid is None:
+            return wrong_api_key()
+        with writing() as conn:
+            change_timer(conn, uid, action, public=True)
+        # The middleware only notifies for signed-in requests, so the app's streams hear it here.
+        hub.notify(uid)
+        with reading() as conn:
+            return public_timer_payload(conn, uid)
+
+    @app.post("/api/v1/timer/pause", tags=["public api"])
+    def public_timer_pause(request: Request):
+        """Pauses the running timer and returns the timer as /api/v1/timer does.
+        409 if no timer is running. Send `Authorization: Bearer <API key>`."""
+        return public_timer_change(request, "pause")
+
+    @app.post("/api/v1/timer/resume", tags=["public api"])
+    def public_timer_resume(request: Request):
+        """Resumes the paused timer and returns the timer as /api/v1/timer does.
+        409 if no timer is paused. Send `Authorization: Bearer <API key>`."""
+        return public_timer_change(request, "resume")
+
+    @app.post("/api/v1/timer/stop", tags=["public api"])
+    def public_timer_stop(request: Request):
+        """Stops the running or paused timer and returns the timer as /api/v1/timer does
+        (with no entry). 409 if there is no timer. Send `Authorization: Bearer <API key>`."""
+        return public_timer_change(request, "stop")
 
     @app.get("/api/timer/stream", tags=["timer"])
     def timer_stream(request: Request, uid: UserId):
@@ -1188,26 +1222,19 @@ def create_app(db_path=None):
     @app.post("/api/timer/pause", tags=["timer"])
     def timer_pause(uid: UserId):
         with writing() as conn:
-            entry = active_entry(conn, uid, "running")
-            close_open_segment(conn, entry["id"])
-            conn.execute("UPDATE entries SET state = 'paused' WHERE id = ?", (entry["id"],))
+            change_timer(conn, uid, "pause")
             return timer_payload(conn, uid)
 
     @app.post("/api/timer/resume", tags=["timer"])
     def timer_resume(uid: UserId):
         with writing() as conn:
-            entry = active_entry(conn, uid, "paused")
-            conn.execute("UPDATE entries SET state = 'running' WHERE id = ?", (entry["id"],))
-            conn.execute(
-                "INSERT INTO segments (entry_id, start_ts) VALUES (?, ?)", (entry["id"], now_ts())
-            )
+            change_timer(conn, uid, "resume")
             return timer_payload(conn, uid)
 
     @app.post("/api/timer/stop", tags=["timer"])
     def timer_stop(uid: UserId):
         with writing() as conn:
-            entry = active_entry(conn, uid, "running", "paused")
-            stop_entry(conn, entry["id"])
+            change_timer(conn, uid, "stop")
             return timer_payload(conn, uid)
 
     # --- Entries ---
@@ -1444,13 +1471,36 @@ def public_timer_payload(conn, user_id):
     }
 
 
-def active_entry(conn, user_id, *states):
+def active_entry(conn, user_id, *states, message="The timer has changed. Reloaded the latest state."):
     row = conn.execute(
         "SELECT * FROM entries WHERE user_id = ? AND state != 'stopped'", (user_id,)
     ).fetchone()
     if row is None or row["state"] not in states:
-        raise ApiError("The timer has changed. Reloaded the latest state.", 409)
+        raise ApiError(message, 409)
     return row
+
+
+# What each timer action needs the timer to be, and the API's message when it is not.
+TIMER_ACTIONS = {
+    "pause": (("running",), "No timer is running, so there is nothing to pause."),
+    "resume": (("paused",), "No timer is paused, so there is nothing to resume."),
+    "stop": (("running", "paused"), "No timer is on, so there is nothing to stop."),
+}
+
+
+def change_timer(conn, user_id, action, public=False):
+    """Pauses, resumes or stops the user's timer; 409 if its state does not allow that.
+    The app's message tells the page to reload; `public` gives the API's plainer one."""
+    states, public_message = TIMER_ACTIONS[action]
+    entry = active_entry(conn, user_id, *states, **({"message": public_message} if public else {}))
+    if action == "pause":
+        close_open_segment(conn, entry["id"])
+        conn.execute("UPDATE entries SET state = 'paused' WHERE id = ?", (entry["id"],))
+    elif action == "resume":
+        conn.execute("UPDATE entries SET state = 'running' WHERE id = ?", (entry["id"],))
+        conn.execute("INSERT INTO segments (entry_id, start_ts) VALUES (?, ?)", (entry["id"], now_ts()))
+    else:
+        stop_entry(conn, entry["id"])
 
 
 def close_open_segment(conn, entry_id):
