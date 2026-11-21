@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.timelog" path="/org/gnome/shell/extensions/timelog/">
+    <key name="server-url" type="s">
+      <default>''</default>
+      <summary>Timelog address</summary>
+      <description>For example https://timelog.example.com</description>
+    </key>
+    <key name="api-key" type="s">
+      <default>''</default>
+      <summary>API key</summary>
+      <description>Made under Settings → API in Timelog.</description>
+    </key>
+    <key name="max-chars" type="i">
+      <range min="0" max="100"/>
+      <default>30</default>
+      <summary>Longest description shown in the top bar</summary>
+      <description>Longer descriptions are cut short; 0 shows only the time.</description>
+    </key>
+    <key name="show-when-idle" type="b">
+      <default>false</default>
+      <summary>Show an icon when no timer is on</summary>
+    </key>
+  </schema>
+</schemalist>

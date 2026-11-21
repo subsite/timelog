@@ -161,6 +161,18 @@ curl -X POST -H "Authorization: Bearer tl_..." https://<your-host>/api/v1/timer/
 
 The app itself uses the same kind of stream, so a timer started on your phone shows up on your laptop within a second.
 
+## GNOME top bar
+
+`gnome-extension/` is a GNOME Shell extension (GNOME 45–49) that shows the running or paused timer in the top bar: the elapsed time and the description, green while running and amber while paused. Click it to pause or resume the timer; right-click it for the menu, which shows the project and customer and can also stop the timer or open Timelog (with no timer on, a left click opens the menu too). It follows the timer stream, so changes made in the app show up within a second, and it reconnects by itself after network changes or suspend.
+
+On the desktop, from a clone of this repository:
+
+```sh
+gnome-extension/install.sh
+```
+
+On Wayland, log out and back in after the first install. Then choose **Settings** in the extension's menu (or open it in the Extensions app) and enter the Timelog address and an API key from **Settings → API**. The key is kept in your GNOME settings (dconf) as plain text. To change what the top bar shows, set the longest description to show (0 shows only the time) and whether the icon stays when no timer is on.
+
 ## Settings in the app
 
 Under **Settings**: theme (system, day, night), date format (ISO text with a calendar button, or the browser's locale), billing rounding, currency (EUR by default) and a default hourly rate. A customer's own rate is set under **Manage → Edit**. The currency is only a display label: amounts are plain numbers, and CSV exports have no currency.

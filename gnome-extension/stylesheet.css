@@ -1,0 +1,24 @@
+.timelog-label {
+  margin-left: 4px;
+  font-feature-settings: "tnum";
+}
+
+.timelog-running .timelog-icon {
+  color: #2ec27e;
+}
+
+.timelog-paused .timelog-icon {
+  color: #f5c211;
+}
+
+.timelog-paused .timelog-label {
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.timelog-problem .timelog-icon {
+  color: #ed333b;
+}
+
+.timelog-menu-title {
+  font-weight: bold;
+}
