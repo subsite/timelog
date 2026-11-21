@@ -361,13 +361,34 @@ class TimelogIndicator extends PanelMenu.Button {
     }
 });
 
+// Where the indicator goes: the end of the left side, right of the clock, or the start of the
+// right side (where most indicators go).
+function addToPanel(uuid, indicator, box) {
+    if (box === 'left')
+        Main.panel.addToStatusArea(uuid, indicator, Main.panel._leftBox.get_n_children(), 'left');
+    else if (box === 'center')
+        Main.panel.addToStatusArea(uuid, indicator, Main.panel._centerBox.get_n_children(), 'center');
+    else
+        Main.panel.addToStatusArea(uuid, indicator, 0, 'right');
+}
+
 export default class TimelogExtension extends Extension {
     enable() {
+        this._settings = this.getSettings();
+        this._boxId = this._settings.connect('changed::panel-box', () => this._place());
+        this._place();
+    }
+
+    // (Re)creates the indicator where the settings say.
+    _place() {
+        this._indicator?.destroy();
         this._indicator = new TimelogIndicator(this);
-        Main.panel.addToStatusArea(this.uuid, this._indicator);
+        addToPanel(this.uuid, this._indicator, this._settings.get_string('panel-box'));
     }
 
     disable() {
+        this._settings.disconnect(this._boxId);
+        this._settings = null;
         this._indicator?.destroy();
         this._indicator = null;
     }

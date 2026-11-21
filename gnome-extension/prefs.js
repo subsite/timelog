@@ -1,5 +1,6 @@
 import Adw from 'gi://Adw';
 import Gio from 'gi://Gio';
+import Gtk from 'gi://Gtk';
 
 import {ExtensionPreferences} from 'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
 
@@ -29,11 +30,32 @@ export default class TimelogPreferences extends ExtensionPreferences {
             subtitle: 'Keeps the icon in the top bar for opening Timelog',
         });
         settings.bind('show-when-idle', idle, 'active', Gio.SettingsBindFlags.DEFAULT);
+        const places = ['left', 'center', 'right'];
+        const place = new Adw.ComboRow({
+            title: 'Position',
+            model: Gtk.StringList.new(['Left', 'Middle, right of the clock', 'Right']),
+            selected: Math.max(0, places.indexOf(settings.get_string('panel-box'))),
+        });
+        place.connect('notify::selected', () => settings.set_string('panel-box', places[place.selected]));
+        display.add(place);
         display.add(chars);
         display.add(idle);
 
+        const about = new Adw.PreferencesGroup({title: 'About'});
+        about.add(new Adw.ActionRow({
+            title: 'Version',
+            subtitle: String(this.metadata.version ?? 'unknown'),
+            subtitle_selectable: true,
+        }));
+        const repo = new Adw.ActionRow({title: 'Source code', subtitle: this.metadata.url});
+        const link = new Gtk.LinkButton({uri: this.metadata.url, label: 'Open', valign: Gtk.Align.CENTER});
+        repo.add_suffix(link);
+        repo.activatable_widget = link;
+        about.add(repo);
+
         page.add(server);
         page.add(display);
+        page.add(about);
         window.add(page);
     }
 }

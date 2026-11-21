@@ -171,7 +171,7 @@ On the desktop, from a clone of this repository:
 gnome-extension/install.sh
 ```
 
-On Wayland, log out and back in after the first install. Then choose **Settings** in the extension's menu (or open it in the Extensions app) and enter the Timelog address and an API key from **Settings → API**. The key is kept in your GNOME settings (dconf) as plain text. To change what the top bar shows, set the longest description to show (0 shows only the time) and whether the icon stays when no timer is on.
+On Wayland, log out and back in after the first install. Then choose **Settings** in the extension's menu (or open it in the Extensions app) and enter the Timelog address and an API key from **Settings → API**. The key is kept in your GNOME settings (dconf) as plain text. The settings also choose where the timer sits in the top bar (left, in the middle right of the clock, or right), the longest description to show (0 shows only the time), and whether the icon stays when no timer is on.
 
 ## Settings in the app
 

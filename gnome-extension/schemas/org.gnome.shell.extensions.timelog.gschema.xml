@@ -17,6 +17,15 @@
       <summary>Longest description shown in the top bar</summary>
       <description>Longer descriptions are cut short; 0 shows only the time.</description>
     </key>
+    <key name="panel-box" type="s">
+      <choices>
+        <choice value="left"/>
+        <choice value="center"/>
+        <choice value="right"/>
+      </choices>
+      <default>'right'</default>
+      <summary>Where in the top bar the timer is shown</summary>
+    </key>
     <key name="show-when-idle" type="b">
       <default>false</default>
       <summary>Show an icon when no timer is on</summary>
