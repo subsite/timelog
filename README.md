@@ -163,7 +163,7 @@ The app itself uses the same kind of stream, so a timer started on your phone sh
 
 ## GNOME top bar
 
-`gnome-extension/` is a GNOME Shell extension (GNOME 45–49) that shows the running or paused timer in the top bar: the elapsed time and the description, green while running and amber while paused. Click it to pause or resume the timer; right-click it for the menu, which shows the project and customer and can also stop the timer or open Timelog (with no timer on, a left click opens the menu too). It follows the timer stream, so changes made in the app show up within a second, and it reconnects by itself after network changes or suspend.
+`gnome-extension/` is a GNOME Shell extension (GNOME 45–50) that shows the running or paused timer in the top bar: the elapsed time and the description, green while running and amber while paused. Click it to pause or resume the timer; right-click it for the menu, which shows the project and customer and can also stop the timer or open Timelog (with no timer on, a left click opens the menu too). It follows the timer stream, so changes made in the app show up within a second, and it reconnects by itself after network changes or suspend.
 
 On the desktop, from a clone of this repository:
 

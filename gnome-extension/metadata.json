@@ -2,8 +2,8 @@
   "uuid": "timelog@subsite.fi",
   "name": "Timelog",
   "description": "Shows the running or paused Timelog timer in the top bar, with pause, resume and stop in its menu. Needs a Timelog server and an API key from Settings → API.",
-  "shell-version": ["45", "46", "47", "48", "49"],
+  "shell-version": ["45", "46", "47", "48", "49", "50"],
   "settings-schema": "org.gnome.shell.extensions.timelog",
   "url": "https://github.com/subsite/timelog",
-  "version": 3
+  "version": 4
 }

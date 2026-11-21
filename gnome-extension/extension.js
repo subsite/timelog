@@ -74,6 +74,30 @@ class TimelogIndicator extends PanelMenu.Button {
         this.menu.addMenuItem(this._open);
         this.menu.addMenuItem(prefs);
 
+        // A left click on a running or paused timer pauses or resumes it instead of opening the
+        // menu; other clicks, touches and the keyboard open the menu as usual. GNOME versions open
+        // panel menus differently (an event handler, or a click gesture in newer ones), but all
+        // go through menu.open(), so the press is noted here and the opening is turned aside there.
+        this._leftPressAt = 0;
+        this.connect('captured-event', (_actor, event) => {
+            const type = event.type();
+            if (type === Clutter.EventType.BUTTON_PRESS)
+                this._leftPressAt = event.get_button() === Clutter.BUTTON_PRIMARY ? now() : 0;
+            else if (type === Clutter.EventType.TOUCH_BEGIN || type === Clutter.EventType.KEY_PRESS)
+                this._leftPressAt = 0;
+            return Clutter.EVENT_PROPAGATE;
+        });
+        const open = this.menu.open.bind(this.menu);
+        this.menu.open = (...args) => {
+            const leftClick = this._leftPressAt && now() - this._leftPressAt < 1;
+            this._leftPressAt = 0;
+            if (leftClick && this._entry) {
+                this._act(this._entry.state === 'running' ? 'pause' : 'resume');
+                return;
+            }
+            open(...args);
+        };
+
         this._settingIds = [
             // Typing in the settings changes these on every key, so wait for a pause.
             this._settings.connect('changed::server-url', () => this._restart(1)),
@@ -245,17 +269,6 @@ class TimelogIndicator extends PanelMenu.Button {
     }
 
     // --- Actions ---
-
-    // A left click on a running or paused timer pauses or resumes it; other clicks, touches and
-    // clicks while no timer is on open the menu as usual.
-    vfunc_event(event) {
-        if (this._entry && !this.menu.isOpen && event.type() === Clutter.EventType.BUTTON_PRESS &&
-            event.get_button() === Clutter.BUTTON_PRIMARY) {
-            this._act(this._entry.state === 'running' ? 'pause' : 'resume');
-            return Clutter.EVENT_STOP;
-        }
-        return super.vfunc_event(event);
-    }
 
     _act(action) {
         if (this._busy)
