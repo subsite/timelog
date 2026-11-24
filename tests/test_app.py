@@ -1466,6 +1466,58 @@ def test_api_key_controls_timer(client, other, clock):
     assert other.get("/api/timer").json()["active"]["state"] == "running"
 
 
+def test_api_key_starts_recent_tasks(client, other, clock):
+    key = client.post("/api/api-key").json()["key"]
+    outsider = TestClient(client.app)
+    auth = {"Authorization": f"Bearer {key}"}
+    wrong = {"Authorization": "Bearer tl_wrong"}
+    website = add_project(client, "Acme", "Website")
+    shop = add_project(client, "Acme", "Shop")
+    old = add_project(client, "Gone", "Old")
+    t = clock.value - 86400
+    add_entry(client, website, (t, t + 60), description="Fix bug", billable=True)
+    add_entry(client, shop, (t + 100, t + 160), description="Fix bug")
+    add_entry(client, website, (t + 200, t + 260), description="Fix bug", billable=False)
+    add_entry(client, website, (t + 300, t + 360))
+    add_entry(client, old, (t + 400, t + 460), description="Archived work")
+    gone = [c for c in client.get("/api/tree").json()["customers"] if c["name"] == "Gone"][0]
+    client.patch(f"/api/customers/{gone['id']}", json={"archived": True})
+    other_project = add_project(other, "Other", "Theirs")
+    add_entry(other, other_project, (t + 500, t + 560), description="Not mine")
+
+    assert outsider.get("/api/v1/recent", headers=wrong).status_code == 401
+    recent = outsider.get("/api/v1/recent", headers=auth).json()
+    # Newest first, one row per description and project, the latest billable flag,
+    # no archived customers or projects and nothing of other users.
+    assert recent == [
+        {"description": "", "project_id": website, "project": "Website", "customer": "Acme",
+         "billable": True, "last_used": timelog.iso_utc(t + 300)},
+        {"description": "Fix bug", "project_id": website, "project": "Website", "customer": "Acme",
+         "billable": False, "last_used": timelog.iso_utc(t + 200)},
+        {"description": "Fix bug", "project_id": shop, "project": "Shop", "customer": "Acme",
+         "billable": True, "last_used": timelog.iso_utc(t + 100)},
+    ]
+    assert len(outsider.get("/api/v1/recent?limit=1", headers=auth).json()) == 1
+
+    def start(body, headers=auth):
+        return outsider.post("/api/v1/timer/start", headers=headers, json=body)
+
+    assert start({"project_id": website}, wrong).status_code == 401
+    assert start({"project_id": other_project}).status_code == 400
+    started = start({"project_id": shop, "description": "Fix bug", "billable": False}).json()
+    assert started["running"] is True
+    assert started["entry"]["description"] == "Fix bug" and started["entry"]["project"] == "Shop"
+    assert started["entry"]["billable"] is False
+
+    # Starting another task stops the current one.
+    clock.value += 120
+    start({"project_id": website, "description": "Review"})
+    assert client.get("/api/timer").json()["active"]["description"] == "Review"
+    entry = client.get("/api/entries").json()["entries"][0]
+    assert entry["description"] == "Fix bug" and entry["state"] == "stopped"
+    assert other.get("/api/timer").json()["active"] is None
+
+
 def test_api_timer_change_reaches_app_streams(client, monkeypatch):
     monkeypatch.setattr(timelog, "STREAM_KEEPALIVE", 0.2)
     project_id = add_project(client, "Acme", "Website")

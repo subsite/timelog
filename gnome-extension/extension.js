@@ -16,6 +16,8 @@ import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 const RECONNECT_MIN = 2; // seconds; doubles after each failure
 const RECONNECT_MAX = 60;
 const STALE_AFTER = 70; // seconds without data before reconnecting (the server sends a keep-alive every 25)
+const RECENT_COUNT = 5; // recent tasks in the menu
+const RECENT_CHARS = 50; // longest recent task label
 
 const now = () => GLib.get_monotonic_time() / 1e6;
 
@@ -70,6 +72,13 @@ class TimelogIndicator extends PanelMenu.Button {
         prefs.connect('activate', () => this._extension.openPreferences());
         for (const item of [this._title, this._detail, this._status, this._toggle, this._stop])
             this.menu.addMenuItem(item);
+        // Recent tasks, reloaded whenever the menu opens; choosing one starts it again.
+        this._recent = new PopupMenu.PopupMenuSection();
+        this.menu.addMenuItem(this._recent);
+        this.menu.connect('open-state-changed', (_menu, isOpen) => {
+            if (isOpen)
+                this._loadRecent();
+        });
         this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
         this.menu.addMenuItem(this._open);
         this.menu.addMenuItem(prefs);
@@ -271,11 +280,25 @@ class TimelogIndicator extends PanelMenu.Button {
     // --- Actions ---
 
     _act(action) {
+        this._send(`/api/v1/timer/${action}`, null, action);
+    }
+
+    _start(task) {
+        const {project_id, description, billable} = task;
+        this._send('/api/v1/timer/start', {project_id, description, billable}, 'start');
+    }
+
+    // POSTs a timer change and shows the timer it answers with.
+    _send(path, json, action) {
         if (this._busy)
             return; // a double click should not pause and resume at once
-        const message = this._request('POST', `/api/v1/timer/${action}`);
+        const message = this._request('POST', path);
         if (!message)
             return;
+        if (json) {
+            const bytes = new GLib.Bytes(new TextEncoder().encode(JSON.stringify(json)));
+            message.set_request_body_from_bytes('application/json', bytes);
+        }
         this._busy = true;
         this._session.send_and_read_async(message, GLib.PRIORITY_DEFAULT, null, (session, result) => {
             this._busy = false;
@@ -298,6 +321,38 @@ class TimelogIndicator extends PanelMenu.Button {
                 Main.notify('Timelog', body?.error ?? `Could not ${action} the timer (${message.get_status()}).`);
             }
         });
+    }
+
+    _loadRecent() {
+        const message = this._request('GET', `/api/v1/recent?limit=${RECENT_COUNT}`);
+        if (!message || !this._apiKey())
+            return;
+        this._session.send_and_read_async(message, GLib.PRIORITY_DEFAULT, null, (session, result) => {
+            let tasks = null;
+            try {
+                const bytes = session.send_and_read_finish(result);
+                if (message.get_status() === Soup.Status.OK)
+                    tasks = JSON.parse(new TextDecoder().decode(bytes.get_data() ?? new Uint8Array()));
+            } catch (e) {
+                tasks = null;
+            }
+            // An older server has no /api/v1/recent; keep the menu as it was on errors.
+            if (Array.isArray(tasks))
+                this._showRecent(tasks);
+        });
+    }
+
+    _showRecent(tasks) {
+        this._recent.removeAll();
+        if (!tasks.length)
+            return;
+        this._recent.addMenuItem(new PopupMenu.PopupSeparatorMenuItem('Start again'));
+        for (const task of tasks) {
+            const label = `${task.description || '(no description)'} · ${task.project}`;
+            const item = new PopupMenu.PopupMenuItem(shorten(label, RECENT_CHARS));
+            item.connect('activate', () => this._start(task));
+            this._recent.addMenuItem(item);
+        }
     }
 
     _openApp() {

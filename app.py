@@ -1178,6 +1178,57 @@ def create_app(db_path=None):
         (with no entry). 409 if there is no timer. Send `Authorization: Bearer <API key>`."""
         return public_timer_change(request, "stop")
 
+    @app.post("/api/v1/timer/start", tags=["public api"])
+    def public_timer_start(request: Request, body: TimerStart):
+        """Starts a new timer with this project, description and billable flag (as from
+        /api/v1/recent), stopping the current one, and returns the timer as /api/v1/timer does.
+        Send `Authorization: Bearer <API key>`."""
+        uid, _key = api_key_owner(request)
+        if uid is None:
+            return wrong_api_key()
+        with writing() as conn:
+            start_timer(conn, uid, body)
+        hub.notify(uid)
+        with reading() as conn:
+            return public_timer_payload(conn, uid)
+
+    @app.get("/api/v1/recent", tags=["public api"])
+    def public_recent(request: Request, limit: Annotated[int, Query(ge=1, le=50)] = 10):
+        """The most recently used description and project pairs, newest first, leaving out
+        archived customers and projects: what to start again with /api/v1/timer/start.
+        Send `Authorization: Bearer <API key>`."""
+        uid, _key = api_key_owner(request)
+        if uid is None:
+            return wrong_api_key()
+        with reading() as conn:
+            found = conn.execute(
+                """
+                SELECT e.description, e.project_id, p.name AS project, c.name AS customer,
+                       e.billable, MAX(s.start_ts) AS last_used
+                FROM entries e
+                JOIN segments s ON s.entry_id = e.id
+                JOIN projects p ON p.id = e.project_id
+                JOIN customers c ON c.id = p.customer_id
+                WHERE e.user_id = ? AND p.archived = 0 AND c.archived = 0
+                GROUP BY e.description, e.project_id
+                ORDER BY last_used DESC
+                LIMIT ?
+                """,
+                (uid, limit),
+            ).fetchall()
+        # With MAX(), SQLite takes billable from the latest entry of each pair.
+        return [
+            {
+                "description": row["description"],
+                "project_id": row["project_id"],
+                "project": row["project"],
+                "customer": row["customer"],
+                "billable": bool(row["billable"]),
+                "last_used": iso_utc(row["last_used"]),
+            }
+            for row in found
+        ]
+
     @app.get("/api/timer/stream", tags=["timer"])
     def timer_stream(request: Request, uid: UserId):
         """Server-sent events for the app itself: a `timer` event with the same JSON as
@@ -1201,22 +1252,7 @@ def create_app(db_path=None):
     @app.post("/api/timer/start", tags=["timer"])
     def timer_start(body: TimerStart, uid: UserId):
         with writing() as conn:
-            require_row(conn, "projects", body.project_id, uid)
-            active = conn.execute(
-                "SELECT id FROM entries WHERE user_id = ? AND state != 'stopped'", (uid,)
-            ).fetchone()
-            if active:
-                stop_entry(conn, active["id"])
-            cur = conn.execute(
-                """
-                INSERT INTO entries (user_id, project_id, description, billable, state)
-                VALUES (?, ?, ?, ?, 'running')
-                """,
-                (uid, body.project_id, body.description, int(body.billable)),
-            )
-            conn.execute(
-                "INSERT INTO segments (entry_id, start_ts) VALUES (?, ?)", (cur.lastrowid, now_ts())
-            )
+            start_timer(conn, uid, body)
             return timer_payload(conn, uid)
 
     @app.post("/api/timer/pause", tags=["timer"])
@@ -1513,6 +1549,24 @@ def close_open_segment(conn, entry_id):
     conn.execute(
         "UPDATE segments SET end_ts = ? WHERE entry_id = ? AND end_ts IS NULL", (now, entry_id)
     )
+
+
+def start_timer(conn, user_id, body):
+    """Starts a new running entry, stopping the user's current timer first."""
+    require_row(conn, "projects", body.project_id, user_id)
+    active = conn.execute(
+        "SELECT id FROM entries WHERE user_id = ? AND state != 'stopped'", (user_id,)
+    ).fetchone()
+    if active:
+        stop_entry(conn, active["id"])
+    cur = conn.execute(
+        """
+        INSERT INTO entries (user_id, project_id, description, billable, state)
+        VALUES (?, ?, ?, ?, 'running')
+        """,
+        (user_id, body.project_id, body.description, int(body.billable)),
+    )
+    conn.execute("INSERT INTO segments (entry_id, start_ts) VALUES (?, ?)", (cur.lastrowid, now_ts()))
 
 
 def stop_entry(conn, entry_id):
