@@ -5,5 +5,5 @@
   "shell-version": ["45", "46", "47", "48", "49", "50"],
   "settings-schema": "org.gnome.shell.extensions.timelog",
   "url": "https://github.com/subsite/timelog",
-  "version": 5
+  "version": 6
 }

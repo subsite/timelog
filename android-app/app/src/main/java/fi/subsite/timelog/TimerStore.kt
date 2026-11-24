@@ -77,6 +77,12 @@ fun formatElapsed(seconds: Long): String {
     return "%d:%02d:%02d".format(s / 3600, s / 60 % 60, s % 60)
 }
 
+/** Hours and minutes, like 12:05, for totals. */
+fun formatHoursMinutes(seconds: Long): String {
+    val m = maxOf(0L, seconds) / 60
+    return "%d:%02d".format(m / 60, m % 60)
+}
+
 /** The address and API key, kept in the app's private storage. */
 class AppSettings(context: Context) {
     private val prefs = context.getSharedPreferences("settings", Context.MODE_PRIVATE)

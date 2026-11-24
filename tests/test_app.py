@@ -1486,7 +1486,8 @@ def test_api_key_starts_recent_tasks(client, other, clock):
     add_entry(other, other_project, (t + 500, t + 560), description="Not mine")
 
     assert outsider.get("/api/v1/recent", headers=wrong).status_code == 401
-    recent = outsider.get("/api/v1/recent", headers=auth).json()
+    fields = ("description", "project_id", "project", "customer", "billable", "last_used")
+    recent = [{k: r[k] for k in fields} for r in outsider.get("/api/v1/recent", headers=auth).json()]
     # Newest first, one row per description and project, the latest billable flag,
     # no archived customers or projects and nothing of other users.
     assert recent == [
@@ -1516,6 +1517,29 @@ def test_api_key_starts_recent_tasks(client, other, clock):
     entry = client.get("/api/entries").json()["entries"][0]
     assert entry["description"] == "Fix bug" and entry["state"] == "stopped"
     assert other.get("/api/timer").json()["active"] is None
+
+
+def test_recent_tasks_have_daily_and_monthly_totals(client, clock):
+    # The clock is 2026-10-15 09:00 in Helsinki.
+    key = client.post("/api/api-key").json()["key"]
+    auth = {"Authorization": f"Bearer {key}"}
+    website = add_project(client, "Acme", "Website")
+    add_entry(client, website, (ts(2026, 9, 30, 10), ts(2026, 9, 30, 12)), description="Fix")
+    add_entry(client, website, (ts(2026, 10, 1, 8), ts(2026, 10, 1, 9)), description="Fix")
+    add_entry(client, website, (ts(2026, 10, 15, 7), ts(2026, 10, 15, 7, 30)), description="Fix")
+    # Just before midnight UTC, so it is today in Helsinki but yesterday in UTC.
+    add_entry(client, website, (ts(2026, 10, 15, 1), ts(2026, 10, 15, 1, 15)), description="Fix")
+    client.post("/api/timer/start", json={"project_id": website, "description": "Fix"})
+    clock.value += 600  # running for ten minutes
+
+    def totals(tz):
+        row = TestClient(client.app).get(f"/api/v1/recent?tz={tz}", headers=auth).json()[0]
+        return row["today_seconds"], row["month_seconds"]
+
+    today = 30 * 60 + 15 * 60 + 600
+    assert totals("Europe/Helsinki") == (today, today + 3600)
+    assert totals("UTC") == (30 * 60 + 600, today + 3600)
+    assert TestClient(client.app).get("/api/v1/recent?tz=Nowhere", headers=auth).status_code == 400
 
 
 def test_api_timer_change_reaches_app_streams(client, monkeypatch):

@@ -26,6 +26,12 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".SettingsActivity"
+            android:exported="false"
+            android:label="Settings"
+            android:parentActivityName=".MainActivity" />
+
         <!-- Keeps the timer stream open so the status bar shows timers started anywhere. -->
         <service
             android:name=".TimerService"

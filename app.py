@@ -1193,18 +1193,31 @@ def create_app(db_path=None):
             return public_timer_payload(conn, uid)
 
     @app.get("/api/v1/recent", tags=["public api"])
-    def public_recent(request: Request, limit: Annotated[int, Query(ge=1, le=50)] = 10):
+    def public_recent(
+        request: Request, limit: Annotated[int, Query(ge=1, le=50)] = 10, tz: str = "UTC",
+    ):
         """The most recently used description and project pairs, newest first, leaving out
         archived customers and projects: what to start again with /api/v1/timer/start.
+        `today_seconds` and `month_seconds` are each pair's time today and this month in the
+        time zone `tz` (segments count on the day they start, running ones up to now).
         Send `Authorization: Bearer <API key>`."""
         uid, _key = api_key_owner(request)
         if uid is None:
             return wrong_api_key()
+        zone = parse_tz(tz)
+        now = now_ts()
+        today = datetime.fromtimestamp(now, tz=zone).date()
+        today_start = day_start(today, zone)
+        month_start = day_start(today.replace(day=1), zone)
         with reading() as conn:
             found = conn.execute(
                 """
                 SELECT e.description, e.project_id, p.name AS project, c.name AS customer,
-                       e.billable, MAX(s.start_ts) AS last_used
+                       e.billable, MAX(s.start_ts) AS last_used,
+                       SUM(CASE WHEN s.start_ts >= ? THEN COALESCE(s.end_ts, ?) - s.start_ts
+                           ELSE 0 END) AS today_seconds,
+                       SUM(CASE WHEN s.start_ts >= ? THEN COALESCE(s.end_ts, ?) - s.start_ts
+                           ELSE 0 END) AS month_seconds
                 FROM entries e
                 JOIN segments s ON s.entry_id = e.id
                 JOIN projects p ON p.id = e.project_id
@@ -1214,9 +1227,9 @@ def create_app(db_path=None):
                 ORDER BY last_used DESC
                 LIMIT ?
                 """,
-                (uid, limit),
+                (today_start, now, month_start, now, uid, limit),
             ).fetchall()
-        # With MAX(), SQLite takes billable from the latest entry of each pair.
+        # With a single MAX(), SQLite takes billable from the latest entry of each pair.
         return [
             {
                 "description": row["description"],
@@ -1225,6 +1238,8 @@ def create_app(db_path=None):
                 "customer": row["customer"],
                 "billable": bool(row["billable"]),
                 "last_used": iso_utc(row["last_used"]),
+                "today_seconds": max(0, row["today_seconds"]),
+                "month_seconds": max(0, row["month_seconds"]),
             }
             for row in found
         ]

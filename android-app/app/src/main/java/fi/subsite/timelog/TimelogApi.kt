@@ -5,6 +5,7 @@ import org.json.JSONObject
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
+import java.net.URLEncoder
 
 class ApiException(message: String, val status: Int = 0) : IOException(message)
 
@@ -15,6 +16,9 @@ data class RecentTask(
     val project: String,
     val customer: String,
     val billable: Boolean,
+    /** Time on this task today and this month, in the time zone sent with the request. */
+    val todaySeconds: Long,
+    val monthSeconds: Long,
 )
 
 /** The public API (/api/v1/), authenticated with the API key. */
@@ -63,8 +67,9 @@ class TimelogApi(private val address: String, private val apiKey: String) {
         return JSONObject(request("/api/v1/timer/start", "POST", body))
     }
 
-    fun recent(limit: Int): List<RecentTask> {
-        val list = JSONArray(request("/api/v1/recent?limit=$limit", "GET"))
+    fun recent(limit: Int, timeZone: String): List<RecentTask> {
+        val tz = URLEncoder.encode(timeZone, "UTF-8")
+        val list = JSONArray(request("/api/v1/recent?limit=$limit&tz=$tz", "GET"))
         return (0 until list.length()).map { i ->
             val o = list.getJSONObject(i)
             RecentTask(
@@ -73,6 +78,8 @@ class TimelogApi(private val address: String, private val apiKey: String) {
                 project = o.optString("project"),
                 customer = o.optString("customer"),
                 billable = o.optBoolean("billable", true),
+                todaySeconds = o.optLong("today_seconds"),
+                monthSeconds = o.optLong("month_seconds"),
             )
         }
     }

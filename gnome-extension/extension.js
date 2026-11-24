@@ -29,6 +29,17 @@ function formatElapsed(seconds) {
     return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 }
 
+function formatHoursMinutes(seconds) {
+    const minutes = Math.floor(Math.max(0, seconds ?? 0) / 60);
+    return `${Math.floor(minutes / 60)}:${String(minutes % 60).padStart(2, '0')}`;
+}
+
+/** The local time zone's IANA name for the server's daily totals, or null if unknown. */
+function timeZoneName() {
+    const id = GLib.TimeZone.new_local().get_identifier();
+    return /^[A-Za-z][A-Za-z0-9_+-]*(\/[A-Za-z0-9_+-]+)*$/.test(id) ? id : null;
+}
+
 function shorten(text, max) {
     return text.length > max ? `${text.slice(0, Math.max(1, max - 1)).trimEnd()}…` : text;
 }
@@ -324,7 +335,9 @@ class TimelogIndicator extends PanelMenu.Button {
     }
 
     _loadRecent() {
-        const message = this._request('GET', `/api/v1/recent?limit=${RECENT_COUNT}`);
+        const tz = timeZoneName();
+        const query = `limit=${RECENT_COUNT}${tz ? `&tz=${encodeURIComponent(tz)}` : ''}`;
+        const message = this._request('GET', `/api/v1/recent?${query}`);
         if (!message || !this._apiKey())
             return;
         this._session.send_and_read_async(message, GLib.PRIORITY_DEFAULT, null, (session, result) => {
@@ -350,6 +363,18 @@ class TimelogIndicator extends PanelMenu.Button {
         for (const task of tasks) {
             const label = `${task.description || '(no description)'} · ${task.project}`;
             const item = new PopupMenu.PopupMenuItem(shorten(label, RECENT_CHARS));
+            // Older servers send no totals.
+            if (task.today_seconds !== undefined) {
+                item.add_child(new St.Label({
+                    text: `today ${formatHoursMinutes(task.today_seconds)}` +
+                        ` · month ${formatHoursMinutes(task.month_seconds)}`,
+                    style_class: 'popup-inactive-menu-item',
+                    style: 'font-feature-settings: "tnum"; padding-left: 24px;',
+                    x_expand: true,
+                    x_align: Clutter.ActorAlign.END,
+                    y_align: Clutter.ActorAlign.CENTER,
+                }));
+            }
             item.connect('activate', () => this._start(task));
             this._recent.addMenuItem(item);
         }
