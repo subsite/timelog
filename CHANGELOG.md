@@ -2,6 +2,13 @@
 
 Timelog is versioned by release date (`YYYY.MM.DD`, with `.2`, `.3`… for further releases on the same day). Every production deploy with `./deploy.sh` is a release: it adds a section here listing the commits since the previous release, and tags it `v<version>`.
 
+## 2026.11.24 (2026-11-24)
+
+- README: how to enable the GNOME extension after installing it
+- Start recent tasks again through the API and from the GNOME extension
+- Android companion app showing the timer in the status bar
+- Recent tasks show their time today and this month
+
 ## 2026.11.21 (2026-11-21)
 
 - GNOME Shell extension showing the timer in the top bar; click to pause or resume
