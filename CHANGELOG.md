@@ -2,6 +2,12 @@
 
 Timelog is versioned by release date (`YYYY.MM.DD`, with `.2`, `.3`… for further releases on the same day). Every production deploy with `./deploy.sh` is a release: it adds a section here listing the commits since the previous release, and tags it `v<version>`.
 
+## 2026.11.21 (2026-11-21)
+
+- GNOME Shell extension showing the timer in the top bar; click to pause or resume
+- GNOME extension: choose its place in the top bar; version and source link in its settings
+- GNOME extension: support GNOME 50, and make click to pause or resume work on newer GNOME versions
+
 ## 2026.11.20 (2026-11-20)
 
 - Pause, resume and stop the timer through the API
