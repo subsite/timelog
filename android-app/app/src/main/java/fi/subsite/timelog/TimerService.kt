@@ -262,7 +262,13 @@ class TimerService : Service() {
             )
             .addAction(action(ACTION_STOP, R.drawable.ic_stop, "Stop"))
 
-        if (entry.running) {
+        if (entry.running && Build.VERSION.SDK_INT >= Build.VERSION_CODES.BAKLAVA) {
+            // tick() re-posts every second here, so the time can be text: Samsung crams the
+            // chronometer right against the title.
+            val elapsed = formatElapsed(entry.elapsedNow())
+            builder.setContentText(if (where.isEmpty()) elapsed else "$elapsed · $where")
+                .setShowWhen(false)
+        } else if (entry.running) {
             builder.setContentText(where)
                 .setWhen(entry.base())
                 .setShowWhen(true)
