@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Timelog</string>
+    <string name="api_key_hint">Make the key in Timelog under Settings → API key. Making a new key there stops the old one, so use the same key in all your apps.</string>
+    <string name="call_style">Show the running time as a call: a pill with a ticking clock in the status bar, also on phones that show only an icon for live updates. Stop becomes the red hang-up button.</string>
+    <string name="start_task">Start</string>
+</resources>
