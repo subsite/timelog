@@ -3,13 +3,14 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
-// Every build that makes an APK gets the next number (kept in the gitignored file
-// build-number), shown as the last part of the version, so you can tell builds apart.
+// Every build that makes an APK or a Play bundle gets the next number (kept in the gitignored
+// file build-number), shown as the last part of the version, so you can tell builds apart.
+// It is also the version code, which Play requires to grow with every upload.
 val buildNumberFile = rootProject.file("build-number")
 val buildNumber: Int = run {
     val last = buildNumberFile.takeIf { it.exists() }?.readText()?.trim()?.toIntOrNull() ?: 1
     val makesApk = gradle.startParameter.taskNames.any {
-        it.contains("assemble", ignoreCase = true) || it.contains("install", ignoreCase = true)
+        listOf("assemble", "install", "bundle").any { name -> it.contains(name, ignoreCase = true) }
     }
     if (makesApk) (last + 1).also { buildNumberFile.writeText("$it\n") } else last
 }

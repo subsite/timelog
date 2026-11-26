@@ -39,6 +39,31 @@ without it you must uninstall the app before installing a new build.
 Every build bumps the number in `build-number` (gitignored), which is the version's last part
 (shown at the bottom of the app) and the version code.
 
+## Google Play (internal testing)
+
+Installing through Play avoids Play Protect's warning for unknown apps, and updates arrive by
+themselves. Build a bundle instead of an APK:
+
+```sh
+android-app/build.sh bundle
+```
+
+and upload `android-app/app/build/outputs/bundle/release/app-release.aab` in the Play Console:
+
+1. Create the app (package `fi.subsite.timelog`), then under *Test and release → Testing →
+   Internal testing* add a tester list with your Google account.
+2. Create a release and upload the `.aab`. Accept *Play App Signing*: Google signs what users
+   get, and `signing.keystore` becomes the **upload key** (Play remembers it from the first
+   upload; later bundles must be signed with it). The upload replaces the app you sideloaded,
+   whose key differs, so uninstall that once before installing from Play.
+3. Fill in what the console asks before the first release: privacy policy URL, app access,
+   data safety, and the declaration for the `specialUse` foreground service (keeping the timer
+   stream open to show it in the status bar).
+4. Open the tester link on the phone, accept, and install from Play.
+
+The minified build's `app/build/outputs/mapping/release/mapping.txt` can be uploaded with each
+release, so crash reports in the console show real names.
+
 On first start allow notifications and, when asked, "Allow running in the background" (turns off
 battery optimization so the connection survives Doze). If the status bar chip does not appear on
 Android 16, check that *Live updates* is allowed in the app's notification settings.
