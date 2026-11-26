@@ -58,6 +58,15 @@ class SettingsActivity : Activity() {
                 Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, packageName),
             )
         }
+        // The service must show a notification to keep running, but the user may turn off
+        // the idle one's category: the service keeps running with nothing to see.
+        findViewById<Button>(R.id.hide_idle).setOnClickListener {
+            startActivity(
+                Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS)
+                    .putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
+                    .putExtra(Settings.EXTRA_CHANNEL_ID, TimerService.CHANNEL_IDLE),
+            )
+        }
     }
 
     override fun onResume() {
@@ -69,6 +78,9 @@ class SettingsActivity : Activity() {
         val promoted = Build.VERSION.SDK_INT < Build.VERSION_CODES.BAKLAVA ||
             getSystemService(NotificationManager::class.java).canPostPromotedNotifications()
         findViewById<View>(R.id.live_updates).visibility = if (promoted) View.GONE else View.VISIBLE
+        val idle = getSystemService(NotificationManager::class.java).getNotificationChannel(TimerService.CHANNEL_IDLE)
+        findViewById<View>(R.id.hide_idle).visibility =
+            if (idle == null || idle.importance == NotificationManager.IMPORTANCE_NONE) View.GONE else View.VISIBLE
     }
 
     override fun onPause() {

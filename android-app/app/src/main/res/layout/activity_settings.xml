@@ -80,6 +80,12 @@
             android:layout_height="wrap_content"
             android:text="Turn on live updates in the status bar" />
 
+        <Button
+            android:id="@+id/hide_idle"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Hide the notification when no timer runs" />
+
         <TextView
             android:id="@+id/version"
             android:layout_width="wrap_content"
