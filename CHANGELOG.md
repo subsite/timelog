@@ -2,6 +2,13 @@
 
 Timelog is versioned by release date (`YYYY.MM.DD`, with `.2`, `.3`… for further releases on the same day). Every production deploy with `./deploy.sh` is a release: it adds a section here listing the commits since the previous release, and tags it `v<version>`.
 
+## 2026.11.26 (2026-11-26)
+
+- Android app: the web page's stopwatch icon, and the running time on its own line in the notification
+- Android app: a settings button for hiding the notification when no timer runs
+- Android app: build a bundle for Google Play internal testing
+- Colors for customers and projects, shown as labels on the Timer page
+
 ## 2026.11.24 (2026-11-24)
 
 - README: how to enable the GNOME extension after installing it
