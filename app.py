@@ -47,6 +47,8 @@ CREATE TABLE IF NOT EXISTS projects (
     customer_id INTEGER NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
     name TEXT NOT NULL COLLATE NOCASE,
     archived INTEGER NOT NULL DEFAULT 0,
+    -- A label color like #1e88e5; NULL means none (shown white).
+    color TEXT CHECK (color IS NULL OR color GLOB '#[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]'),
     UNIQUE (customer_id, name)
 );
 {entries}
@@ -93,6 +95,8 @@ CREATE TABLE IF NOT EXISTS {name} (
     archived INTEGER NOT NULL DEFAULT 0,
     -- NULL means the default hourly rate from the user's preferences.
     hourly_rate REAL CHECK (hourly_rate IS NULL OR hourly_rate >= 0),
+    -- A label color like #1e88e5; NULL means none (shown white).
+    color TEXT CHECK (color IS NULL OR color GLOB '#[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]'),
     UNIQUE (user_id, name)
 );
 """
@@ -176,6 +180,8 @@ Name = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max
 Description = Annotated[str, StringConstraints(strip_whitespace=True, max_length=2000)]
 Timestamp = Annotated[int, Field(ge=MIN_TS, le=MAX_TS)]
 Rate = Annotated[float, Field(ge=0, le=1_000_000)]
+# Stored lowercase, as #rrggbb.
+Color = Annotated[str, StringConstraints(strip_whitespace=True, to_lower=True, pattern=r"^#[0-9a-fA-F]{6}$")]
 
 
 class Body(BaseModel):
@@ -196,6 +202,8 @@ class ItemUpdate(Body):
     archived: bool | None = None
     # Customers only; null goes back to the default rate.
     hourly_rate: Rate | None = None
+    # Null removes the color.
+    color: Color | None = None
 
 
 class TimerStart(Body):
@@ -291,6 +299,7 @@ def init_db(path):
     migrate_to_users(conn)
     add_entry_source_column(conn)
     add_user_api_key_column(conn)
+    add_color_columns(conn)
     conn.executescript(SCHEMA)
     conn.execute(
         "INSERT OR IGNORE INTO settings (key, value) VALUES ('secret_key', ?)",
@@ -346,6 +355,16 @@ def add_user_api_key_column(conn):
     columns = table_columns(conn, "users")
     if columns and "api_key_hash" not in columns:
         conn.execute("ALTER TABLE users ADD COLUMN api_key_hash TEXT")
+
+
+def add_color_columns(conn):
+    for table in ("customers", "projects"):
+        columns = table_columns(conn, table)
+        if columns and "color" not in columns:
+            conn.execute(
+                f"ALTER TABLE {table} ADD COLUMN color TEXT CHECK (color IS NULL OR color GLOB "
+                "'#[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]')"
+            )
 
 
 def add_customer_rate_column(conn):
@@ -433,15 +452,15 @@ def export_user_database(source_path, user_id, destination):
         )
         conn.execute(
             """
-            INSERT INTO export.customers (id, user_id, name, archived, hourly_rate)
-            SELECT id, user_id, name, archived, hourly_rate FROM customers WHERE user_id = ?
+            INSERT INTO export.customers (id, user_id, name, archived, hourly_rate, color)
+            SELECT id, user_id, name, archived, hourly_rate, color FROM customers WHERE user_id = ?
             """,
             (user_id,),
         )
         conn.execute(
             """
-            INSERT INTO export.projects (id, customer_id, name, archived)
-            SELECT p.id, p.customer_id, p.name, p.archived
+            INSERT INTO export.projects (id, customer_id, name, archived, color)
+            SELECT p.id, p.customer_id, p.name, p.archived, p.color
             FROM projects p JOIN customers c ON c.id = p.customer_id WHERE c.user_id = ?
             """,
             (user_id,),
@@ -1026,7 +1045,7 @@ def create_app(db_path=None):
                 "customers": rows(
                     conn.execute(
                         """
-                        SELECT c.id, c.name, c.archived, c.hourly_rate,
+                        SELECT c.id, c.name, c.archived, c.hourly_rate, c.color,
                                EXISTS (SELECT 1 FROM projects p JOIN entries e ON e.project_id = p.id
                                        WHERE p.customer_id = c.id) AS has_time
                         FROM customers c WHERE c.user_id = ? ORDER BY c.name
@@ -1071,6 +1090,8 @@ def create_app(db_path=None):
                     conn.execute(
                         "UPDATE customers SET hourly_rate = ? WHERE id = ?", (body.hourly_rate, item_id)
                     )
+                if "color" in body.model_fields_set:
+                    conn.execute(f"UPDATE {kind} SET color = ? WHERE id = ?", (body.color, item_id))
                 if body.name is not None:
                     conn.execute(f"UPDATE {kind} SET name = ? WHERE id = ?", (body.name, item_id))
                 if body.archived is not None:

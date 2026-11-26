@@ -338,6 +338,7 @@ def test_users_have_their_own_names_and_timers(client, other, clock):
 
 def test_export_holds_only_the_users_data(client, other, clock, tmp_path, monkeypatch, github):
     mine = add_project(client, "Acme", "Website")
+    client.patch(f"/api/projects/{mine}", json={"color": "#00897b"})
     t = clock.value
     add_entry(client, mine, (t - 7200, t - 3600), description="Mine")
     client.post("/api/timer/start", json={"project_id": mine, "description": "Running"})
@@ -356,6 +357,7 @@ def test_export_holds_only_the_users_data(client, other, clock, tmp_path, monkey
     assert [r[0] for r in conn.execute("SELECT email FROM users")] == ["me@example.com"]
     assert [r[0] for r in conn.execute("SELECT name FROM customers")] == ["Acme"]
     assert [r[0] for r in conn.execute("SELECT name FROM projects")] == ["Website"]
+    assert conn.execute("SELECT color FROM projects").fetchone()[0] == "#00897b"
     assert sorted(r[0] for r in conn.execute("SELECT description FROM entries")) == ["Mine", "Running"]
     assert conn.execute("SELECT COUNT(*) FROM segments").fetchone()[0] == 2
     assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
@@ -1141,6 +1143,42 @@ def test_hourly_rate_is_validated_and_customers_only(client):
     assert renamed["hourly_rate"] == 95.5
 
 
+def test_customers_and_projects_have_colors(client, other):
+    project_id = add_project(client)
+    customer_id = client.get("/api/tree").json()["customers"][0]["id"]
+    tree = client.get("/api/tree").json()
+    assert tree["customers"][0]["color"] is None and tree["projects"][0]["color"] is None
+
+    assert client.patch(f"/api/customers/{customer_id}", json={"color": "#1E88E5"}).json()["color"] == "#1e88e5"
+    assert client.patch(f"/api/projects/{project_id}", json={"color": "#e53935"}).json()["color"] == "#e53935"
+    tree = client.get("/api/tree").json()
+    assert tree["customers"][0]["color"] == "#1e88e5" and tree["projects"][0]["color"] == "#e53935"
+    # Other changes leave the color alone; null removes it.
+    assert client.patch(f"/api/projects/{project_id}", json={"name": "Site"}).json()["color"] == "#e53935"
+    assert client.patch(f"/api/projects/{project_id}", json={"color": None}).json()["color"] is None
+
+    for bad in ("red", "#12345", "#1234567", "#ggg000", "1e88e5", 123):
+        assert client.patch(f"/api/customers/{customer_id}", json={"color": bad}).status_code == 400
+    assert other.patch(f"/api/customers/{customer_id}", json={"color": "#000000"}).status_code == 400
+
+
+def test_old_tables_get_color_columns(tmp_path):
+    path = str(tmp_path / "old.db")
+    conn = timelog.init_db(path)
+    conn.execute("ALTER TABLE customers DROP COLUMN color")
+    conn.execute("ALTER TABLE projects DROP COLUMN color")
+    user_id = timelog.add_user(conn, "me@example.com")
+    conn.execute("INSERT INTO customers (user_id, name) VALUES (?, 'Acme')", (user_id,))
+    conn.commit()
+    conn.close()
+    conn = timelog.init_db(path)
+    assert "color" in timelog.table_columns(conn, "customers") and "color" in timelog.table_columns(conn, "projects")
+    assert tuple(conn.execute("SELECT name, color FROM customers").fetchone()) == ("Acme", None)
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("UPDATE customers SET color = 'blue'")
+    conn.close()
+
+
 # --- Migration ---
 
 
@@ -1261,7 +1299,7 @@ def test_single_user_database_moves_to_first_user(tmp_path, monkeypatch, github)
     conn = timelog.init_db(str(path))
     assert [tuple(r) for r in conn.execute("SELECT id, email, github_id FROM users")] == [(1, timelog.FIRST_USER_EMAIL, None)]
     assert timelog.read_preferences(conn, 1).currency == "SEK"
-    assert [tuple(r) for r in conn.execute("SELECT * FROM customers")] == [(1, 1, "Acme", 0, 120.0)]
+    assert [tuple(r) for r in conn.execute("SELECT * FROM customers")] == [(1, 1, "Acme", 0, 120.0, None)]
     assert [tuple(r) for r in conn.execute("SELECT id, user_id, state FROM entries ORDER BY id")] == [
         (4, 1, "stopped"), (5, 1, "running"),
     ]

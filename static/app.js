@@ -231,6 +231,58 @@ function pathLabel(projectId) {
   return project ? `${customer.name} › ${project.name}` : "Unknown project";
 }
 
+// Label colors offered in Manage; any other #rrggbb works too.
+const COLORS = ["#e53935", "#fb8c00", "#fdd835", "#43a047", "#00897b", "#1e88e5", "#3949ab", "#8e24aa", "#d81b60", "#6d4c41", "#757575"];
+
+// A name on a colored label (white when no color is set), with text that stays readable.
+function colorTag(name, color, archived = false) {
+  const tag = h("span", { class: `tag${archived ? " archived" : ""}` }, name);
+  if (color) {
+    const [r, g, b] = [1, 3, 5].map((i) => parseInt(color.slice(i, i + 2), 16));
+    tag.style.setProperty("--tag-bg", color);
+    tag.style.setProperty("--tag-fg", r * 0.299 + g * 0.587 + b * 0.114 > 150 ? "#1a1a1a" : "#fff");
+    tag.classList.add("colored");
+  }
+  return tag;
+}
+
+// The customer and project of an entry as two labels.
+function pathTags(projectId) {
+  const { project, customer } = projectPath(projectId);
+  if (!project) return h("span", { class: "path-tags" }, "Unknown project");
+  return h("span", { class: "path-tags", title: pathLabel(projectId) }, colorTag(customer.name, customer.color), colorTag(project.name, project.color));
+}
+
+// Color swatches plus a custom picker; `value` is "#rrggbb" or null for none.
+function colorField(initial) {
+  let value = initial ?? null;
+  const custom = h("input", { type: "color", "aria-label": "Custom color", value: value ?? "#1e88e5" });
+  // The native picker, invisible over a round swatch: a rainbow until a custom color is picked.
+  const customSwatch = h("label", { class: "swatch custom", title: "Custom color" }, custom);
+  const swatch = (color, label) =>
+    h("button", {
+      type: "button",
+      class: `swatch${color ? "" : " none"}`,
+      title: label,
+      "aria-label": label,
+      onclick: () => pick(color),
+    });
+  const buttons = [swatch(null, "No color"), ...COLORS.map((c) => swatch(c, c))];
+  buttons.slice(1).forEach((b, i) => b.style.setProperty("--swatch", COLORS[i]));
+  function pick(color) {
+    value = color;
+    if (color) custom.value = color;
+    buttons.forEach((b, i) => b.classList.toggle("chosen", (i === 0 ? null : COLORS[i - 1]) === value));
+    const isCustom = value !== null && !COLORS.includes(value);
+    customSwatch.classList.toggle("chosen", isCustom);
+    if (isCustom) customSwatch.style.setProperty("--swatch", value);
+    else customSwatch.style.removeProperty("--swatch");
+  }
+  custom.addEventListener("input", () => pick(custom.value.toLowerCase()));
+  pick(value);
+  return { el: h("div", { class: "color-field" }, ...buttons, customSwatch), get value() { return value; } };
+}
+
 function usableProject(projectId) {
   const { project, customer } = projectPath(projectId);
   return project && !project.archived && !customer.archived ? projectId : null;
@@ -321,6 +373,7 @@ function editCustomer(customer) {
       value: customer.hourly_rate === null ? "" : String(customer.hourly_rate),
       placeholder: S.prefs.default_rate ? `Default: ${fmtMoney(S.prefs.default_rate)}` : "Default rate",
     });
+    const color = colorField(customer.color);
     const dlg = h(
       "dialog",
       { class: "narrow" },
@@ -329,13 +382,55 @@ function editCustomer(customer) {
         {
           onsubmit: (e) => {
             e.preventDefault();
-            finish({ name: name.value.trim(), hourly_rate: rate.value === "" ? null : Number(rate.value) });
+            finish({ name: name.value.trim(), hourly_rate: rate.value === "" ? null : Number(rate.value), color: color.value });
           },
         },
         h("h2", {}, "Edit customer"),
         h("label", {}, "Name", name),
+        h("div", { class: "field" }, h("span", { class: "field-label" }, "Color"), color.el),
         h("label", {}, `Hourly rate (${currency()})`, rate),
         h("p", { class: "hint" }, "Leave empty to use the default rate from Settings."),
+        h(
+          "div",
+          { class: "dialog-buttons" },
+          h("button", { class: "primary", type: "submit" }, "Save"),
+          h("button", { type: "button", onclick: () => finish(null) }, "Cancel")
+        )
+      )
+    );
+    let done = false;
+    function finish(value) {
+      if (done) return;
+      done = true;
+      dlg.close();
+      dlg.remove();
+      resolve(value);
+    }
+    dlg.addEventListener("cancel", () => finish(null));
+    document.body.append(dlg);
+    dlg.showModal();
+    name.select();
+  });
+}
+
+function editProject(project) {
+  return new Promise((resolve) => {
+    const name = h("input", { value: project.name, required: true, maxLength: 200 });
+    const color = colorField(project.color);
+    const dlg = h(
+      "dialog",
+      { class: "narrow" },
+      h(
+        "form",
+        {
+          onsubmit: (e) => {
+            e.preventDefault();
+            finish({ name: name.value.trim(), color: color.value });
+          },
+        },
+        h("h2", {}, "Edit project"),
+        h("label", {}, "Name", name),
+        h("div", { class: "field" }, h("span", { class: "field-label" }, "Color"), color.el),
         h(
           "div",
           { class: "dialog-buttons" },
@@ -755,7 +850,7 @@ function activeTimerCard() {
       "div",
       { class: "active-info" },
       h("div", {}, entry.description || h("span", { class: "muted" }, "(no description)")),
-      h("div", { class: "entry-sub" }, pathLabel(entry.project_id))
+      h("div", { class: "entry-sub" }, pathTags(entry.project_id))
     ),
     h(
       "div",
@@ -918,7 +1013,7 @@ function groupRows(group) {
       "div",
       { class: "entry-main" },
       entryLabel(first),
-      h("div", { class: "entry-sub" }, pathLabel(first.project_id)),
+      h("div", { class: "entry-sub" }, pathTags(first.project_id)),
       h("div", { class: "entry-sub num" }, `${fmtTime(start)}–${fmtTime(end)}`)
     ),
     h("span", { class: "duration" }, fmtClock(group.entries.reduce((sum, e) => sum + entrySeconds(e), 0))),
@@ -944,7 +1039,7 @@ function entryRow(entry, inGroup = false) {
       "div",
       { class: "entry-main" },
       entryLabel(entry),
-      h("div", { class: "entry-sub" }, pathLabel(entry.project_id)),
+      h("div", { class: "entry-sub" }, pathTags(entry.project_id)),
       h("div", { class: "entry-sub num" }, segmentSummary(entry))
     ),
     h("span", { class: "duration" }, fmtClock(entrySeconds(entry))),
@@ -1332,15 +1427,9 @@ async function showManage() {
 
   function itemRow(kind, item, addLabel, addFn) {
     const rename = guard(async () => {
-      if (kind === "customers") {
-        const changes = await editCustomer(item);
-        if (!changes) return;
-        await api(`/api/customers/${item.id}`, "PATCH", changes);
-      } else {
-        const name = await askName("Rename", item.name);
-        if (!name) return;
-        await api(`/api/${kind}/${item.id}`, "PATCH", { name });
-      }
+      const changes = await (kind === "customers" ? editCustomer(item) : editProject(item));
+      if (!changes) return;
+      await api(`/api/${kind}/${item.id}`, "PATCH", changes);
       await rerender();
     });
     const toggleArchive = guard(async () => {
@@ -1376,11 +1465,11 @@ async function showManage() {
       h(
         "span",
         { class: "name" },
-        item.name,
+        colorTag(item.name, item.color),
         kind === "customers" && item.hourly_rate !== null ? h("span", { class: "rate" }, `${fmtMoney(item.hourly_rate)}/h`) : null
       ),
       addFn ? h("button", { type: "button", class: "small", onclick: guard(addFn) }, addLabel) : null,
-      h("button", { type: "button", class: "small", onclick: rename }, kind === "customers" ? "Edit" : "Rename"),
+      h("button", { type: "button", class: "small", onclick: rename }, "Edit"),
       h("button", { type: "button", class: "small", onclick: toggleArchive }, item.archived ? "Restore" : "Archive"),
       h("button", { type: "button", class: "small danger", onclick: remove }, "Delete")
     );
