@@ -156,6 +156,7 @@ button.small { padding: 3px 9px; font-size: 13px; }
 }
 .entry .count[aria-expanded="true"] { border-color: var(--accent); color: var(--accent); }
 .entry.grouped { padding-left: 54px; background: var(--bg); }
+.pause-gap { font-size: 12px; font-style: italic; opacity: .75; padding-left: 10px; }
 
 .settings-card { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
 .settings-card h2 { font-size: 18px; margin: 0; }

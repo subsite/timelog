@@ -890,15 +890,25 @@ function dayTitle(ts) {
   return `${WEEKDAYS[date.getDay()]} ${iso}`;
 }
 
-function segmentSummary(entry) {
+// An entry's times, one line per segment, with the pauses between them, so a paused and resumed
+// timer reads as one entry rather than as several.
+function segmentLines(entry) {
   const firstDay = dateKey(new Date(entry.segments[0].start * 1000));
-  return entry.segments
-    .map((seg) => {
-      const day = dateKey(new Date(seg.start * 1000));
-      const prefix = day === firstDay ? "" : `${fmtDate(seg.start)} `;
-      return `${prefix}${fmtTime(seg.start)}–${fmtTime(seg.end)}`;
-    })
-    .join(", ");
+  const lines = [];
+  entry.segments.forEach((seg, i) => {
+    if (i > 0) lines.push(h("div", { class: "pause-gap" }, `paused ${fmtGap(seg.start - entry.segments[i - 1].end)}`));
+    const day = dateKey(new Date(seg.start * 1000));
+    const prefix = day === firstDay ? "" : `${fmtDate(seg.start)} `;
+    lines.push(h("div", {}, `${prefix}${fmtTime(seg.start)}–${fmtTime(seg.end)}`));
+  });
+  return lines;
+}
+
+function fmtGap(seconds) {
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 1) return "under a minute";
+  if (minutes < 60) return `${minutes} min`;
+  return `${Math.floor(minutes / 60)} h ${minutes % 60} min`;
 }
 
 function renderEntries() {
@@ -1023,7 +1033,7 @@ function entryRow(entry) {
   return h(
     "div",
     { class: "entry grouped" },
-    h("div", { class: "entry-main" }, h("div", { class: "entry-sub num" }, segmentSummary(entry))),
+    h("div", { class: "entry-main" }, h("div", { class: "entry-sub num" }, segmentLines(entry))),
     h("span", { class: "duration" }, fmtClock(entrySeconds(entry))),
     h("div", { class: "entry-actions" }, editButton(entry), deleteButton(entry))
   );
