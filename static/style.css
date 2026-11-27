@@ -275,7 +275,7 @@ td.group-label.level-2 { padding-left: 58px; }
   .settings-layout { grid-template-columns: minmax(0, 1fr); gap: 10px; }
   .settings-nav { position: static; flex-direction: row; flex-wrap: wrap; gap: 4px; }
   .settings-nav a { white-space: nowrap; padding: 5px 9px; }
-  .group-head .entry-main { flex-basis: calc(100% - 40px); }
+  .entry .count + .entry-main { flex-basis: calc(100% - 40px); }
   .entry.grouped { padding-left: 14px; }
   .entry-actions { margin-left: auto; }
   .segment-row { grid-template-columns: minmax(0, 1fr) 32px; }
@@ -374,6 +374,7 @@ body.non-production { border-top: 4px solid #c62828; }
   border: 1px solid var(--border);
   overflow-wrap: anywhere;
 }
+.path-tags .tag { margin-left: 0; }
 .tag.colored { border-color: transparent; }
 .tree-row .name .tag { font-size: 14px; line-height: 22px; }
 

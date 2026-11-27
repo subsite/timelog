@@ -924,7 +924,7 @@ function renderEntries() {
         h("span", {}, dayTitle(entries[0].segments[0].start)),
         h("span", { class: "num" }, fmtClock(entries.reduce((sum, e) => sum + entrySeconds(e), 0)))
       ),
-      groupSameWork(entries).map((group) => (group.entries.length === 1 ? entryRow(group.entries[0]) : groupRows(group)))
+      groupSameWork(entries).map(groupRows)
     )
   );
   if (timerPage.hasMore) {
@@ -987,9 +987,6 @@ function entryLabel(entry) {
 function groupRows(group) {
   const first = group.entries[0];
   const open = timerPage.expanded.has(group.key);
-  const segments = group.entries.flatMap((e) => e.segments);
-  const start = Math.min(...segments.map((seg) => seg.start));
-  const end = Math.max(...segments.map((seg) => seg.end));
   const toggle = () => {
     if (open) timerPage.expanded.delete(group.key);
     else timerPage.expanded.add(group.key);
@@ -1003,7 +1000,7 @@ function groupRows(group) {
       {
         type: "button",
         class: "count",
-        title: open ? "Hide the separate entries" : "Show the separate entries",
+        title: open ? "Hide the times" : "Show the times, and edit or delete",
         "aria-expanded": String(open),
         onclick: toggle,
       },
@@ -1013,43 +1010,22 @@ function groupRows(group) {
       "div",
       { class: "entry-main" },
       entryLabel(first),
-      h("div", { class: "entry-sub" }, pathTags(first.project_id)),
-      h("div", { class: "entry-sub num" }, `${fmtTime(start)}–${fmtTime(end)}`)
+      h("div", { class: "entry-sub" }, pathTags(first.project_id))
     ),
     h("span", { class: "duration" }, fmtClock(group.entries.reduce((sum, e) => sum + entrySeconds(e), 0))),
     h("div", { class: "entry-actions" }, continueButton(first))
   );
-  return open ? [head, ...group.entries.map((entry) => entryRow(entry, true))] : head;
+  return open ? [head, ...group.entries.map(entryRow)] : head;
 }
 
-function entryRow(entry, inGroup = false) {
-  if (inGroup) {
-    return h(
-      "div",
-      { class: "entry grouped" },
-      h("div", { class: "entry-main" }, h("div", { class: "entry-sub num" }, segmentSummary(entry))),
-      h("span", { class: "duration" }, fmtClock(entrySeconds(entry))),
-      h("div", { class: "entry-actions" }, editButton(entry), deleteButton(entry))
-    );
-  }
+// One opened entry under its group's row: its times, and Edit and Delete.
+function entryRow(entry) {
   return h(
     "div",
-    { class: "entry" },
-    h(
-      "div",
-      { class: "entry-main" },
-      entryLabel(entry),
-      h("div", { class: "entry-sub" }, pathTags(entry.project_id)),
-      h("div", { class: "entry-sub num" }, segmentSummary(entry))
-    ),
+    { class: "entry grouped" },
+    h("div", { class: "entry-main" }, h("div", { class: "entry-sub num" }, segmentSummary(entry))),
     h("span", { class: "duration" }, fmtClock(entrySeconds(entry))),
-    h(
-      "div",
-      { class: "entry-actions" },
-      continueButton(entry),
-      editButton(entry),
-      deleteButton(entry)
-    )
+    h("div", { class: "entry-actions" }, editButton(entry), deleteButton(entry))
   );
 }
 
